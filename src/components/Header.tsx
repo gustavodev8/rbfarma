@@ -8,7 +8,7 @@ const Header = () => {
         {/* Logo */}
         <div className="flex items-center gap-2 shrink-0">
           <Heart className="h-7 w-7 text-primary" fill="currentColor" />
-          <span className="text-xl font-extrabold text-primary tracking-tight">FarmaBem</span>
+          <span className="text-xl font-extrabold text-primary tracking-tight">RB FARMA</span>
         </div>
 
         {/* Search */}

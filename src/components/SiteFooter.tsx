@@ -31,10 +31,10 @@ const SiteFooter = () => {
         <div className="border-t border-background/10 mt-10 pt-6 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             <Heart className="h-5 w-5 text-primary" fill="currentColor" />
-            <span className="font-bold text-sm text-background/90">FarmaBem</span>
+            <span className="font-bold text-sm text-background/90">RB FARMA</span>
           </div>
           <p className="text-xs text-background/40 text-center">
-            CNPJ: 00.000.000/0001-00 - FarmaBem Comercio de Medicamentos LTDA. Todos os direitos reservados.
+            CNPJ: 00.000.000/0001-00 - RB FARMA Comercio de Medicamentos LTDA. Todos os direitos reservados.
           </p>
         </div>
       </div>
