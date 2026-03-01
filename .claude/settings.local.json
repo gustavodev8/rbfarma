@@ -4,7 +4,31 @@
       "mcp__Claude_Preview__preview_start",
       "Bash(where:*)",
       "Bash(node --version:*)",
-      "Bash(npm:*)"
+      "Bash(npm:*)",
+      "Bash(ls:*)",
+      "Bash(cmd /c \"dir C:\\\\Users\\\\Pichau\\\\Desktop\\\\rbfarma\\\\node_modules\\\\.bin\\\\vite*\")",
+      "Bash(cmd /c \"dir C:\\\\Users\\\\Pichau\\\\Desktop\\\\rbfarma\\\\node_modules\\\\.bin\\\\ | findstr /i vite\")",
+      "Bash(cmd /c:*)",
+      "Bash(powershell -Command \"Test-Path ''C:\\\\Users\\\\Pichau\\\\Desktop\\\\rbfarma\\\\node_modules''\")",
+      "Bash(powershell -Command:*)",
+      "Bash(node \"C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js\" install caniuse-lite browserslist)",
+      "Bash(node \"C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js\" install zustand)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(node:*)",
+      "WebFetch(domain:www.drogaraia.com.br)",
+      "WebFetch(domain:www.drogasil.com.br)",
+      "WebFetch(domain:www.panvel.com)",
+      "WebFetch(domain:www.ultrafarma.com.br)",
+      "WebFetch(domain:www.paguemenos.com.br)",
+      "WebFetch(domain:api.mercadolibre.com)",
+      "Bash(powershell -command:*)",
+      "Bash(powershell -NoProfile -Command:*)",
+      "WebFetch(domain:www.netshoes.com.br)",
+      "Bash(npx tsc:*)",
+      "Bash(echo:*)",
+      "Bash(__NEW_LINE_7768a9c8d1f48ce7__ curl -s --max-time 5 \"https://icmqjjnwnsvwmnqepnjt.supabase.co/rest/v1/sections?is_active=eq.true&order=display_order.asc&select=id,name\" -H \"apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImljbXFqam53bnN2d21ucWVwbmp0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIwNDkyMzcsImV4cCI6MjA4NzYyNTIzN30.oEkVEF71d2bHtHCFatlMt3L_UMgTp8Cma_SSqRfjM-0\" -w \" | %{time_total}s\")",
+      "Bash(__NEW_LINE_7768a9c8d1f48ce7__ curl -s --max-time 5 \"https://icmqjjnwnsvwmnqepnjt.supabase.co/rest/v1/banners?is_active=eq.true&order=display_order.asc&select=id,url\" -H \"apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImljbXFqam53bnN2d21ucWVwbmp0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIwNDkyMzcsImV4cCI6MjA4NzYyNTIzN30.oEkVEF71d2bHtHCFatlMt3L_UMgTp8Cma_SSqRfjM-0\" -w \" | %{time_total}s\")"
     ]
   }
 }

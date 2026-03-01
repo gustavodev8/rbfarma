@@ -4,8 +4,9 @@
     {
       "name": "rbfarma",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js", "run", "dev"],
-      "port": 5173
+      "runtimeArgs": ["C:/Users/Pichau/Desktop/rbfarma/node_modules/vite/bin/vite.js"],
+      "port": 5173,
+      "autoPort": true
     }
   ]
 }

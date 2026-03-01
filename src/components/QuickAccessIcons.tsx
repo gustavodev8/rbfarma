@@ -14,17 +14,17 @@ const icons = [
 
 const QuickAccessIcons = () => {
   return (
-    <section className="container mx-auto py-6">
-      <div className="flex gap-3 overflow-x-auto scrollbar-hide pb-2">
+    <section className="container mx-auto py-6 px-4">
+      <div className="flex justify-center gap-2 md:gap-6 overflow-x-auto scrollbar-hide pb-2">
         {icons.map(({ label, Icon }) => (
           <button
             key={label}
-            className="flex flex-col items-center gap-2 min-w-[80px] group"
+            className="flex flex-col items-center gap-2 min-w-[80px] md:min-w-[96px] group"
           >
-            <div className="w-14 h-14 rounded-2xl bg-quick-icon flex items-center justify-center group-hover:scale-105 transition-transform">
-              <Icon className="h-6 w-6 text-foreground" strokeWidth={1.5} />
+            <div className="w-16 h-16 md:w-20 md:h-20 rounded-2xl bg-quick-icon flex items-center justify-center group-hover:scale-105 group-hover:bg-red-50 transition-all shadow-sm">
+              <Icon className="h-7 w-7 md:h-9 md:w-9 text-foreground group-hover:text-[#e8001c] transition-colors" strokeWidth={1.5} />
             </div>
-            <span className="text-xs text-muted-foreground text-center leading-tight group-hover:text-foreground transition-colors">
+            <span className="text-xs md:text-sm text-muted-foreground text-center leading-tight group-hover:text-[#e8001c] transition-colors font-medium">
               {label}
             </span>
           </button>
