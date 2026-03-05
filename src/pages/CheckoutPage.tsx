@@ -3,12 +3,14 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   ChevronRight, User, MapPin, CheckCircle2, Smartphone,
   FileText, Lock, ChevronDown, Loader2, Copy, Check, AlertCircle,
-  ShoppingBag, ArrowRight,
+  ShoppingBag, ArrowRight, X,
 } from "lucide-react";
 import { useCart, cartTotal, cartCount } from "@/hooks/useCart";
 import { useAuth }                       from "@/hooks/useAuth";
 import { createOrder }                   from "@/services/ordersService";
 import { createPayment }                 from "@/services/paymentService";
+import { validateCupom, incrementCupomUso } from "@/services/cuponsService";
+import type { Cupom }                    from "@/services/cuponsService";
 import { calculateShipping, shippingLabel, FREE_SHIPPING_THRESHOLD } from "@/services/shippingService";
 import Header                            from "@/components/Header";
 
@@ -398,6 +400,12 @@ export default function CheckoutPage() {
   const [neighborhood, setNeighborhood] = useState("");
   const [city,         setCity]         = useState("");
   const [uf,           setUf]           = useState("");
+  // Cupom de desconto
+  const [cupomInput,   setCupomInput]   = useState("");
+  const [cupomAplicado,setCupomAplicado]= useState<Cupom | null>(null);
+  const [cupomDesconto,setCupomDesconto]= useState(0);
+  const [cupomLoading, setCupomLoading] = useState(false);
+  const [cupomError,   setCupomError]   = useState("");
 
   // Scroll ao topo na montagem
   useEffect(() => { window.scrollTo(0, 0); }, []);
@@ -408,6 +416,14 @@ export default function CheckoutPage() {
     if (user?.email    && !email) setEmail(user.email);
     if (profile?.cpf   && !cpf)   setCpf(profile.cpf);
     if (profile?.phone && !phone) setPhone(profile.phone);
+    // Endereço salvo no perfil
+    if (profile?.address_cep          && !cep)          setCep(profile.address_cep);
+    if (profile?.address_street       && !address)      setAddress(profile.address_street);
+    if (profile?.address_number       && !addressNum)   setAddressNum(profile.address_number);
+    if (profile?.address_complement   && !complement)   setComplement(profile.address_complement);
+    if (profile?.address_neighborhood && !neighborhood) setNeighborhood(profile.address_neighborhood);
+    if (profile?.address_city         && !city)         setCity(profile.address_city);
+    if (profile?.address_state        && !uf)           setUf(profile.address_state);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, user]);
 
@@ -420,9 +436,34 @@ export default function CheckoutPage() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const pixDiscount  = payment === "pix" ? total * 0.05 : 0;
+  const pixDiscount  = payment === "pix" ? (total - cupomDesconto) * 0.05 : 0;
   const shippingCost = calculateShipping(uf, total);
-  const finalTotal   = total - pixDiscount + shippingCost;
+  const finalTotal   = total - cupomDesconto - pixDiscount + shippingCost;
+
+  async function handleApplyCupom() {
+    const code = cupomInput.trim();
+    if (!code) return;
+    setCupomLoading(true);
+    setCupomError("");
+    const result = await validateCupom(code, total);
+    setCupomLoading(false);
+    if ("error" in result) {
+      setCupomError(result.error);
+      setCupomAplicado(null);
+      setCupomDesconto(0);
+    } else {
+      setCupomAplicado(result.cupom);
+      setCupomDesconto(result.desconto);
+      setCupomError("");
+    }
+  }
+
+  function handleRemoveCupom() {
+    setCupomAplicado(null);
+    setCupomDesconto(0);
+    setCupomInput("");
+    setCupomError("");
+  }
 
   // ── Busca CEP ───────────────────────────────────────────────────
   async function handleCepSearch() {
@@ -507,9 +548,10 @@ export default function CheckoutPage() {
           payment_method:        payment,
           payment_installments:  1,
           subtotal:              total,
-          discount:              pixDiscount,
+          discount:              cupomDesconto + pixDiscount,
           shipping_cost:         shippingCost,
           total:                 finalTotal,
+          cupom_codigo:          cupomAplicado?.codigo ?? null,
           payment_code:          payResult.pixCode || payResult.boletoCode || null,
           payment_qr_url:        payResult.pixQrCodeUrl || null,
           items: items.map((i) => ({
@@ -529,6 +571,10 @@ export default function CheckoutPage() {
         const { order } = await Promise.race([orderPromise, timeoutPromise]);
         if (order?.order_number) setOrderNum(order.order_number);
         if (order?.id)           setOrderId(order.id);
+        // Incrementa uso do cupom após salvar o pedido
+        if (cupomAplicado) {
+          incrementCupomUso(cupomAplicado.id, cupomAplicado.usos_count).catch(() => {});
+        }
       } catch (orderErr) {
         console.warn("[handleSubmit] Erro ao salvar pedido (não crítico):", orderErr);
         // Não bloqueia o fluxo — o pagamento já foi criado com sucesso
@@ -783,12 +829,61 @@ export default function CheckoutPage() {
 
               <div className="h-px bg-gray-100" />
 
+              {/* Cupom de desconto */}
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-gray-700">Cupom de desconto</p>
+                {cupomAplicado ? (
+                  <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-xl px-3 py-2">
+                    <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-bold text-green-700 font-mono">{cupomAplicado.codigo}</p>
+                      <p className="text-xs text-green-600">-{fmt(cupomDesconto)}</p>
+                    </div>
+                    <button onClick={handleRemoveCupom} className="text-gray-400 hover:text-gray-600 transition-colors">
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <div className="flex gap-2">
+                      <input
+                        value={cupomInput}
+                        onChange={e => { setCupomInput(e.target.value.toUpperCase()); setCupomError(""); }}
+                        onKeyDown={e => e.key === "Enter" && handleApplyCupom()}
+                        placeholder="Codigo do cupom"
+                        className="flex-1 border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 placeholder-gray-300 focus:outline-none focus:border-[#e8001c] focus:ring-1 focus:ring-[#e8001c]/20 font-mono uppercase"
+                      />
+                      <button
+                        onClick={handleApplyCupom}
+                        disabled={cupomLoading || !cupomInput.trim()}
+                        className="px-3 py-2 bg-gray-800 hover:bg-gray-900 text-white text-xs font-semibold rounded-xl transition-colors disabled:opacity-50 shrink-0"
+                      >
+                        {cupomLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Aplicar"}
+                      </button>
+                    </div>
+                    {cupomError && (
+                      <p className="text-xs text-red-600 flex items-center gap-1">
+                        <AlertCircle className="h-3 w-3 shrink-0" />{cupomError}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="h-px bg-gray-100" />
+
               {/* Valores */}
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500">Subtotal ({count})</span>
                   <span className="text-gray-700">{fmt(total)}</span>
                 </div>
+                {cupomDesconto > 0 && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-green-600 font-medium">Cupom {cupomAplicado?.codigo}</span>
+                    <span className="text-green-600 font-medium">-{fmt(cupomDesconto)}</span>
+                  </div>
+                )}
                 {payment === "pix" && (
                   <div className="flex justify-between text-sm">
                     <span className="text-green-600 font-medium">Desconto PIX (5%)</span>

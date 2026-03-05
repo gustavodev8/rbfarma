@@ -10,6 +10,13 @@ export interface UserProfile {
   phone: string | null;
   birth_date: string | null;
   email: string;
+  address_cep: string | null;
+  address_street: string | null;
+  address_number: string | null;
+  address_complement: string | null;
+  address_neighborhood: string | null;
+  address_city: string | null;
+  address_state: string | null;
 }
 
 export interface SignUpData {
@@ -68,6 +75,10 @@ export const useAuth = create<AuthState>()((set, get) => ({
       const rows = await restGet<{
         id: string; name: string | null; cpf: string | null;
         phone: string | null; birth_date: string | null;
+        address_cep: string | null; address_street: string | null;
+        address_number: string | null; address_complement: string | null;
+        address_neighborhood: string | null; address_city: string | null;
+        address_state: string | null;
       }>("profiles", { id: `eq.${userId}` });
 
       if (rows.length > 0) {
@@ -75,12 +86,19 @@ export const useAuth = create<AuthState>()((set, get) => ({
         const { user } = get();
         set({
           profile: {
-            id:         data.id,
-            name:       data.name ?? "",
-            cpf:        data.cpf ?? null,
-            phone:      data.phone ?? null,
-            birth_date: data.birth_date ?? null,
-            email:      user?.email ?? "",
+            id:                   data.id,
+            name:                 data.name ?? "",
+            cpf:                  data.cpf ?? null,
+            phone:                data.phone ?? null,
+            birth_date:           data.birth_date ?? null,
+            email:                user?.email ?? "",
+            address_cep:          data.address_cep ?? null,
+            address_street:       data.address_street ?? null,
+            address_number:       data.address_number ?? null,
+            address_complement:   data.address_complement ?? null,
+            address_neighborhood: data.address_neighborhood ?? null,
+            address_city:         data.address_city ?? null,
+            address_state:        data.address_state ?? null,
           },
         });
       }
@@ -156,7 +174,18 @@ export const useAuth = create<AuthState>()((set, get) => ({
     set((s) => ({
       profile: s.profile
         ? { ...s.profile, ...data }
-        : { id: user.id, email: user.email ?? "", name: data.name ?? "", cpf: data.cpf ?? null, phone: data.phone ?? null, birth_date: data.birth_date ?? null },
+        : {
+            id: user.id, email: user.email ?? "",
+            name: data.name ?? "", cpf: data.cpf ?? null,
+            phone: data.phone ?? null, birth_date: data.birth_date ?? null,
+            address_cep: data.address_cep ?? null,
+            address_street: data.address_street ?? null,
+            address_number: data.address_number ?? null,
+            address_complement: data.address_complement ?? null,
+            address_neighborhood: data.address_neighborhood ?? null,
+            address_city: data.address_city ?? null,
+            address_state: data.address_state ?? null,
+          },
     }));
     return {};
   },

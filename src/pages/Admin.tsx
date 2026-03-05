@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { supabase } from "@/services/supabaseClient";
 import { fetchAllProducts, toggleProductActive, deleteProduct } from "@/services/productsService";
 import {
@@ -26,7 +27,20 @@ import {
   toggleColaboradorAtivo, deleteColaborador,
 } from "@/services/colaboradoresService";
 import type { Colaborador } from "@/services/colaboradoresService";
-import { restGet, restPost } from "@/services/supabaseRest";
+import { fetchEstoque, ajustarEstoque } from "@/services/estoqueService";
+import type { EstoqueProduto } from "@/services/estoqueService";
+import { fetchMeta, saveMeta } from "@/services/metasService";
+import type { Meta } from "@/services/metasService";
+import {
+  fetchCupons, createCupom, toggleCupomAtivo, deleteCupom,
+} from "@/services/cuponsService";
+import type { Cupom, CupomInput } from "@/services/cuponsService";
+import {
+  fetchContas, createConta, updateContaStatus, deleteConta,
+  CATEGORIAS_PAGAR, CATEGORIAS_RECEBER,
+} from "@/services/contasService";
+import type { Conta, ContaInput, ContaTipo } from "@/services/contasService";
+import { restGet, restPost, restPatch } from "@/services/supabaseRest";
 import type { Order } from "@/services/ordersService";
 import AdminProductForm from "@/components/AdminProductForm";
 import { Button } from "@/components/ui/button";
@@ -51,13 +65,18 @@ import {
   ChevronUp, ChevronDown, LayoutList, Search, X,
   Image as ImageIcon, Download, Package, ShoppingBag,
   TrendingUp, TrendingDown, Clock, BarChart2, ExternalLink, RefreshCw,
-  ChevronRight, Truck, CheckCircle2, XCircle, AlertCircle,
+  ChevronRight, ChevronLeft, Truck, CheckCircle2, XCircle, AlertCircle,
   Link as LinkIcon, Save, ShoppingCart, Users, Menu, Minus, Receipt,
   Wallet, ArrowUpCircle, ArrowDownCircle, CalendarDays,
-  UserPlus, UserCheck, UserX,
+  UserPlus, UserCheck, UserX, Target, FileBarChart2, Boxes,
+  Tag, BadgePercent, DollarSign, CalendarClock, Award, BadgeCheck,
+  Ban, CreditCard, FileDown,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
+import { gerarRelatorioPDF } from "@/services/pdfService";
+import type { PDFSecoes } from "@/services/pdfService";
+import { Checkbox } from "@/components/ui/checkbox";
 
 // ─── Formatadores ─────────────────────────────────────────────────────────────
 const fmt = (v: number) => v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -2412,6 +2431,1466 @@ function ClientesTab({ isActive }: { isActive: boolean }) {
   );
 }
 
+// ─── Aba Estoque ─────────────────────────────────────────────────────────────
+function EstoqueTab({ isActive }: { isActive: boolean }) {
+  const [produtos, setProdutos] = useState<EstoqueProduto[]>([]);
+  const [loading, setLoading]   = useState(false);
+  const loaded = useRef(false);
+  const [search, setSearch]     = useState("");
+  const [filtro, setFiltro]     = useState<"todos" | "baixo" | "zero">("todos");
+
+  const [ajusteOpen,   setAjusteOpen]   = useState(false);
+  const [produtoSel,   setProdutoSel]   = useState<EstoqueProduto | null>(null);
+  const [tipoAjuste,   setTipoAjuste]   = useState<"entrada" | "saida" | "inventario">("entrada");
+  const [qtdAjuste,    setQtdAjuste]    = useState("");
+  const [stockMinEdit, setStockMinEdit] = useState("");
+  const [saving,       setSaving]       = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await fetchEstoque();
+      setProdutos(data);
+      loaded.current = true;
+    } catch { toast.error("Erro ao carregar estoque"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (isActive && !loaded.current) load();
+  }, [isActive, load]);
+
+  function openAjuste(p: EstoqueProduto) {
+    setProdutoSel(p);
+    setTipoAjuste("entrada");
+    setQtdAjuste("");
+    setStockMinEdit(String(p.stock_min));
+    setAjusteOpen(true);
+  }
+
+  async function handleSaveAjuste() {
+    if (!produtoSel) return;
+    const qty = Number(qtdAjuste);
+    if (tipoAjuste !== "inventario" && (isNaN(qty) || qty <= 0)) {
+      toast.error("Quantidade inválida"); return;
+    }
+    if (tipoAjuste === "inventario" && (isNaN(qty) || qty < 0)) {
+      toast.error("Quantidade inválida"); return;
+    }
+    setSaving(true);
+    try {
+      let novoStock = produtoSel.stock;
+      if      (tipoAjuste === "entrada")    novoStock = novoStock + qty;
+      else if (tipoAjuste === "saida")      novoStock = Math.max(0, novoStock - qty);
+      else                                  novoStock = qty;
+      const novoMin = Number(stockMinEdit);
+      const minFinal = isNaN(novoMin) ? produtoSel.stock_min : novoMin;
+      await ajustarEstoque(produtoSel.id, novoStock, minFinal);
+      setProdutos(prev =>
+        prev.map(p => p.id === produtoSel.id
+          ? { ...p, stock: novoStock, stock_min: minFinal }
+          : p
+        )
+      );
+      toast.success("Estoque atualizado");
+      setAjusteOpen(false);
+    } catch { toast.error("Erro ao atualizar"); }
+    finally { setSaving(false); }
+  }
+
+  const filtered = produtos
+    .filter(p => {
+      if (filtro === "zero")  return p.stock === 0;
+      if (filtro === "baixo") return p.stock > 0 && p.stock <= p.stock_min;
+      return true;
+    })
+    .filter(p =>
+      !search.trim() ||
+      p.name.toLowerCase().includes(search.toLowerCase()) ||
+      p.brand.toLowerCase().includes(search.toLowerCase())
+    )
+    .sort((a, b) => a.stock - b.stock);
+
+  const semEstoque   = produtos.filter(p => p.stock === 0).length;
+  const baixoEstoque = produtos.filter(p => p.stock > 0 && p.stock <= p.stock_min).length;
+
+  function StockBadge({ p }: { p: EstoqueProduto }) {
+    if (p.stock === 0)
+      return <span className="inline-flex text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700">Sem estoque</span>;
+    if (p.stock <= p.stock_min)
+      return <span className="inline-flex text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">Estoque baixo</span>;
+    return <span className="inline-flex text-xs font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700">OK</span>;
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Alertas de estoque */}
+      {(semEstoque > 0 || baixoEstoque > 0) && (
+        <div className="grid sm:grid-cols-2 gap-3">
+          {semEstoque > 0 && (
+            <div className="flex items-center gap-3 bg-red-50 border border-red-200 rounded-xl p-3.5">
+              <AlertCircle className="h-5 w-5 text-red-600 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-red-700">{semEstoque} produto{semEstoque > 1 ? "s" : ""} sem estoque</p>
+                <p className="text-xs text-red-600">Requer reposição imediata</p>
+              </div>
+            </div>
+          )}
+          {baixoEstoque > 0 && (
+            <div className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3.5">
+              <AlertCircle className="h-5 w-5 text-amber-600 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-amber-700">{baixoEstoque} produto{baixoEstoque > 1 ? "s" : ""} com estoque baixo</p>
+                <p className="text-xs text-amber-600">Abaixo do mínimo definido</p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Filtros */}
+      <div className="flex flex-col sm:flex-row gap-2">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar produto..." className="pl-9" />
+        </div>
+        <div className="flex gap-1.5">
+          {(["todos", "baixo", "zero"] as const).map(f => (
+            <button key={f} onClick={() => setFiltro(f)}
+              className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                filtro === f
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background border border-border text-muted-foreground hover:text-foreground"
+              }`}>
+              {f === "todos" ? "Todos" : f === "baixo" ? "Estoque baixo" : "Sem estoque"}
+            </button>
+          ))}
+        </div>
+        <Button size="sm" variant="outline" onClick={() => { loaded.current = false; load(); }} className="gap-1.5">
+          <RefreshCw className="h-3.5 w-3.5" />Atualizar
+        </Button>
+      </div>
+
+      {/* Tabela */}
+      <div className="bg-background rounded-xl border border-border overflow-hidden">
+        {loading ? (
+          <div className="p-12 text-center text-sm text-muted-foreground">
+            <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />Carregando...
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="p-12 text-center text-sm text-muted-foreground">Nenhum produto encontrado.</div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Produto</TableHead>
+                <TableHead className="text-center">Estoque atual</TableHead>
+                <TableHead className="text-center hidden sm:table-cell">Mínimo</TableHead>
+                <TableHead className="text-center">Status</TableHead>
+                <TableHead className="text-right">Ajustar</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.map(p => (
+                <TableRow key={p.id}>
+                  <TableCell>
+                    <p className="font-medium text-sm">{p.name}</p>
+                    <p className="text-xs text-muted-foreground">{p.brand}</p>
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <span className={`text-lg font-bold ${
+                      p.stock === 0 ? "text-red-600" : p.stock <= p.stock_min ? "text-amber-600" : "text-foreground"
+                    }`}>{p.stock}</span>
+                  </TableCell>
+                  <TableCell className="text-center text-sm text-muted-foreground hidden sm:table-cell">{p.stock_min}</TableCell>
+                  <TableCell className="text-center"><StockBadge p={p} /></TableCell>
+                  <TableCell className="text-right">
+                    <Button size="sm" variant="outline" onClick={() => openAjuste(p)} className="gap-1.5">
+                      <Pencil className="h-3.5 w-3.5" />Ajustar
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+
+      {/* Dialog ajuste */}
+      <Dialog open={ajusteOpen} onOpenChange={setAjusteOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Ajustar estoque</DialogTitle>
+          </DialogHeader>
+          {produtoSel && (
+            <div className="space-y-4">
+              <div className="bg-secondary rounded-xl p-3">
+                <p className="font-semibold text-sm">{produtoSel.name}</p>
+                <p className="text-xs text-muted-foreground">{produtoSel.brand}</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Estoque atual: <strong>{produtoSel.stock}</strong> unidade{produtoSel.stock !== 1 ? "s" : ""}
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Tipo de ajuste</Label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(["entrada", "saida", "inventario"] as const).map(t => (
+                    <button key={t} onClick={() => setTipoAjuste(t)}
+                      className={`py-2 rounded-lg text-xs font-medium border transition-colors ${
+                        tipoAjuste === t
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "border-border text-muted-foreground hover:text-foreground"
+                      }`}>
+                      {t === "entrada" ? "Entrada" : t === "saida" ? "Saida" : "Inventario"}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {tipoAjuste === "entrada"    ? "Adiciona ao estoque atual (recebimento de mercadoria)" :
+                   tipoAjuste === "saida"      ? "Subtrai do estoque atual (perda, avaria...)" :
+                   "Define a quantidade exata (contagem fisica)"}
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>{tipoAjuste === "inventario" ? "Quantidade real contada" : "Quantidade"}</Label>
+                <Input
+                  type="number" min="0"
+                  value={qtdAjuste}
+                  onChange={e => setQtdAjuste(e.target.value)}
+                  placeholder="0"
+                  onKeyDown={e => e.key === "Enter" && handleSaveAjuste()}
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Estoque minimo (alerta)</Label>
+                <Input
+                  type="number" min="0"
+                  value={stockMinEdit}
+                  onChange={e => setStockMinEdit(e.target.value)}
+                  placeholder="5"
+                />
+              </div>
+
+              <Button className="w-full" onClick={handleSaveAjuste} disabled={saving}>
+                {saving ? <><RefreshCw className="h-4 w-4 animate-spin mr-2" />Salvando...</> : "Salvar"}
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ─── Aba Relatorios ───────────────────────────────────────────────────────────
+type PeriodKey = "hoje" | "semana" | "mes" | "mes_passado";
+
+function getDateRange(period: PeriodKey): { start: Date; end: Date } {
+  const now   = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (period === "hoje") {
+    return { start: today, end: now };
+  }
+  if (period === "semana") {
+    const start = new Date(today);
+    start.setDate(today.getDate() - today.getDay());
+    return { start, end: now };
+  }
+  if (period === "mes") {
+    return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now };
+  }
+  // mes_passado
+  return {
+    start: new Date(now.getFullYear(), now.getMonth() - 1, 1),
+    end:   new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59),
+  };
+}
+
+function RelatoriosTab({ isActive }: { isActive: boolean }) {
+  const [orders,  setOrders]  = useState<Order[]>([]);
+  const [loading, setLoading] = useState(false);
+  const loaded = useRef(false);
+  const [period, setPeriod]   = useState<PeriodKey>("mes");
+  const [pdfOpen,    setPdfOpen]    = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfSecoes,  setPdfSecoes]  = useState<PDFSecoes>({
+    pedidos:       true,
+    produtos:      true,
+    colaboradores: true,
+    fluxoCaixa:    false,
+    contas:        false,
+    comissoes:     false,
+  });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setOrders(await fetchAllOrders());
+      loaded.current = true;
+    } catch { toast.error("Erro ao carregar relatorio"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (isActive && !loaded.current) load();
+  }, [isActive, load]);
+
+  const range = getDateRange(period);
+
+  const pedidosPeriod = useMemo(() =>
+    orders.filter(o => {
+      if (o.status === "cancelled") return false;
+      const d = new Date(o.created_at);
+      return d >= range.start && d <= range.end;
+    }),
+  [orders, range.start, range.end]);
+
+  const faturamento = useMemo(() =>
+    pedidosPeriod.reduce((s, o) => s + Number(o.total), 0),
+  [pedidosPeriod]);
+
+  const ticketMedio = pedidosPeriod.length > 0 ? faturamento / pedidosPeriod.length : 0;
+
+  const totalItens = useMemo(() =>
+    pedidosPeriod.reduce((s, o) => s + (o.order_items?.length ?? 0), 0),
+  [pedidosPeriod]);
+
+  const revenueByDay = useMemo(() => {
+    const map: Record<string, number> = {};
+    pedidosPeriod.forEach(o => {
+      const d   = new Date(o.created_at);
+      const key = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
+      map[key]  = (map[key] ?? 0) + Number(o.total);
+    });
+    return Object.entries(map)
+      .map(([date, total]) => ({ date, total }))
+      .sort((a, b) => {
+        const [ad, am] = a.date.split("/").map(Number);
+        const [bd, bm] = b.date.split("/").map(Number);
+        return am !== bm ? am - bm : ad - bd;
+      });
+  }, [pedidosPeriod]);
+
+  const topProducts = useMemo(() => {
+    const map: Record<string, { name: string; qty: number; total: number }> = {};
+    pedidosPeriod.forEach(o => {
+      (o.order_items ?? []).forEach(item => {
+        const k = item.product_name ?? item.product_id;
+        if (!map[k]) map[k] = { name: item.product_name ?? k, qty: 0, total: 0 };
+        map[k].qty   += item.quantity;
+        map[k].total += item.quantity * Number(item.unit_price);
+      });
+    });
+    return Object.values(map).sort((a, b) => b.qty - a.qty).slice(0, 8);
+  }, [pedidosPeriod]);
+
+  const byColaborador = useMemo(() => {
+    const map: Record<string, { nome: string; pedidos: number; total: number }> = {};
+    pedidosPeriod.forEach(o => {
+      const nome = o.vendedor_nome ?? "Sem vendedor";
+      if (!map[nome]) map[nome] = { nome, pedidos: 0, total: 0 };
+      map[nome].pedidos++;
+      map[nome].total += Number(o.total);
+    });
+    return Object.values(map).sort((a, b) => b.total - a.total);
+  }, [pedidosPeriod]);
+
+  const PERIOD_OPTIONS: { key: PeriodKey; label: string }[] = [
+    { key: "hoje",        label: "Hoje"         },
+    { key: "semana",      label: "Esta semana"  },
+    { key: "mes",         label: "Este mes"     },
+    { key: "mes_passado", label: "Mes passado"  },
+  ];
+
+  const handleGerarPDF = useCallback(async () => {
+    setPdfLoading(true);
+    try {
+      const mesMes = period === "mes_passado"
+        ? (() => { const d = new Date(); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); })()
+        : new Date().toISOString().slice(0, 7);
+
+      const r = getDateRange(period);
+
+      const [fluxoData, contasData, colaboradoresData] = await Promise.all([
+        pdfSecoes.fluxoCaixa ? fetchFluxoCombinado(mesMes) : Promise.resolve([]),
+        pdfSecoes.contas     ? fetchContas()               : Promise.resolve([]),
+        pdfSecoes.comissoes  ? fetchColaboradores()        : Promise.resolve([]),
+      ]);
+
+      const fluxoFiltrado = fluxoData.filter(f => {
+        const d = new Date(f.data + "T00:00:00");
+        return d >= r.start && d <= r.end;
+      });
+
+      const periodLabel = PERIOD_OPTIONS.find(o => o.key === period)?.label ?? period;
+
+      gerarRelatorioPDF({
+        titulo:  "Relatorio de Desempenho",
+        periodo: periodLabel,
+        secoes:  pdfSecoes,
+        dados: {
+          orders:        pedidosPeriod,
+          fluxo:         fluxoFiltrado,
+          contas:        contasData,
+          colaboradores: colaboradoresData,
+        },
+        metricas: {
+          faturamento:  faturamento,
+          totalPedidos: pedidosPeriod.length,
+          ticketMedio:  ticketMedio,
+          totalItens:   totalItens,
+        },
+      });
+
+      setPdfOpen(false);
+      toast.success("PDF gerado com sucesso");
+    } catch {
+      toast.error("Erro ao gerar PDF");
+    } finally {
+      setPdfLoading(false);
+    }
+  }, [pdfSecoes, period, pedidosPeriod, faturamento, ticketMedio, totalItens, PERIOD_OPTIONS]);
+
+  return (
+    <div className="space-y-5">
+      {/* Period selector */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {PERIOD_OPTIONS.map(o => (
+          <button key={o.key} onClick={() => setPeriod(o.key)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              period === o.key
+                ? "bg-primary text-primary-foreground"
+                : "bg-background border border-border text-muted-foreground hover:text-foreground"
+            }`}>
+            {o.label}
+          </button>
+        ))}
+        <div className="ml-auto flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => { loaded.current = false; load(); }} className="gap-1.5">
+            <RefreshCw className="h-3.5 w-3.5" />Atualizar
+          </Button>
+          <Button size="sm" onClick={() => setPdfOpen(true)} className="gap-1.5">
+            <FileDown className="h-3.5 w-3.5" />Gerar PDF
+          </Button>
+        </div>
+      </div>
+
+      {/* Cards resumo */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {[
+          { label: "Faturamento",   value: fmt(faturamento),            icon: TrendingUp,  color: "text-green-600",  bg: "bg-green-50"  },
+          { label: "Pedidos",       value: String(pedidosPeriod.length), icon: ShoppingBag, color: "text-blue-600",   bg: "bg-blue-50"   },
+          { label: "Ticket medio",  value: fmt(ticketMedio),             icon: BarChart2,   color: "text-purple-600", bg: "bg-purple-50" },
+          { label: "Itens vendidos",value: String(totalItens),           icon: Package,     color: "text-orange-600", bg: "bg-orange-50" },
+        ].map(m => {
+          const Icon = m.icon;
+          return (
+            <div key={m.label} className="bg-background rounded-xl border border-border p-4">
+              <div className={`inline-flex items-center justify-center w-8 h-8 rounded-lg ${m.bg} mb-3`}>
+                <Icon className={`h-4 w-4 ${m.color}`} />
+              </div>
+              <p className="text-xl font-bold">{loading ? "..." : m.value}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{m.label}</p>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Grafico de barras */}
+      {revenueByDay.length > 1 && (
+        <div className="bg-background rounded-xl border border-border p-5">
+          <h3 className="font-semibold text-sm mb-4">Faturamento por dia</h3>
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={revenueByDay} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+              <XAxis dataKey="date" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis
+                tickFormatter={v => `R$${(v as number) >= 1000 ? `${((v as number) / 1000).toFixed(1)}k` : v}`}
+                tick={{ fontSize: 10 }} axisLine={false} tickLine={false} width={50}
+              />
+              <Tooltip formatter={(v: unknown) => [fmt(v as number), "Receita"]} />
+              <Bar dataKey="total" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Paineis inferiores */}
+      <div className="grid lg:grid-cols-2 gap-4">
+        {/* Top produtos */}
+        <div className="bg-background rounded-xl border border-border overflow-hidden">
+          <div className="px-5 py-4 border-b border-border">
+            <h3 className="font-semibold text-sm">Produtos mais vendidos</h3>
+          </div>
+          {topProducts.length === 0 ? (
+            <p className="p-5 text-sm text-muted-foreground">Sem dados para o periodo.</p>
+          ) : (
+            <div className="divide-y divide-border">
+              {topProducts.map((p, i) => (
+                <div key={p.name} className="px-5 py-3 flex items-center gap-3">
+                  <span className="text-xs font-bold text-muted-foreground w-5 shrink-0">{i + 1}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{p.name}</p>
+                    <p className="text-xs text-muted-foreground">{p.qty} un.</p>
+                  </div>
+                  <span className="text-sm font-semibold shrink-0">{fmt(p.total)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Por colaborador */}
+        <div className="bg-background rounded-xl border border-border overflow-hidden">
+          <div className="px-5 py-4 border-b border-border">
+            <h3 className="font-semibold text-sm">Vendas por colaborador</h3>
+          </div>
+          {byColaborador.length === 0 ? (
+            <p className="p-5 text-sm text-muted-foreground">Sem dados para o periodo.</p>
+          ) : (
+            <div className="divide-y divide-border">
+              {byColaborador.map((c, i) => (
+                <div key={c.nome} className="px-5 py-3 flex items-center gap-3">
+                  <span className="text-xs font-bold text-muted-foreground w-5 shrink-0">{i + 1}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{c.nome}</p>
+                    <p className="text-xs text-muted-foreground">{c.pedidos} pedido{c.pedidos !== 1 ? "s" : ""}</p>
+                  </div>
+                  <span className="text-sm font-semibold shrink-0">{fmt(c.total)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Dialog PDF ────────────────────────────────────────────────────── */}
+      <Dialog open={pdfOpen} onOpenChange={setPdfOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Gerar Relatorio PDF</DialogTitle>
+          </DialogHeader>
+
+          <p className="text-xs text-muted-foreground -mt-1">
+            Periodo selecionado:{" "}
+            <span className="font-medium text-foreground">
+              {PERIOD_OPTIONS.find(o => o.key === period)?.label}
+            </span>
+          </p>
+
+          <div className="space-y-3 py-1">
+            <p className="text-sm font-medium">Secoes a incluir</p>
+            {(
+              [
+                { key: "pedidos",       label: "Lista de pedidos"           },
+                { key: "produtos",      label: "Produtos mais vendidos"     },
+                { key: "colaboradores", label: "Vendas por colaborador"     },
+                { key: "fluxoCaixa",   label: "Fluxo de caixa"             },
+                { key: "contas",        label: "Contas a pagar / receber"   },
+                { key: "comissoes",     label: "Comissoes de colaboradores" },
+              ] as { key: keyof PDFSecoes; label: string }[]
+            ).map(s => (
+              <label key={s.key} className="flex items-center gap-2.5 cursor-pointer select-none">
+                <Checkbox
+                  checked={pdfSecoes[s.key]}
+                  onCheckedChange={v => setPdfSecoes(prev => ({ ...prev, [s.key]: !!v }))}
+                />
+                <span className="text-sm">{s.label}</span>
+              </label>
+            ))}
+          </div>
+
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" size="sm" onClick={() => setPdfOpen(false)}>
+              Cancelar
+            </Button>
+            <Button size="sm" onClick={handleGerarPDF} disabled={pdfLoading} className="gap-1.5">
+              <FileDown className="h-3.5 w-3.5" />
+              {pdfLoading ? "Gerando..." : "Baixar PDF"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ─── Aba Metas ────────────────────────────────────────────────────────────────
+function MetasTab({ isActive }: { isActive: boolean }) {
+  const now = new Date();
+  const [mes, setMes]         = useState(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`);
+  const [meta, setMeta]       = useState<Meta | null>(null);
+  const [ordersDoMes, setOrdersDoMes] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [editMode, setEditMode]           = useState(false);
+  const [editFaturamento, setEditFaturamento] = useState("");
+  const [editPedidos, setEditPedidos]     = useState("");
+  const [saving, setSaving]               = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [metaData, ordersData] = await Promise.all([fetchMeta(mes), fetchAllOrders()]);
+      setMeta(metaData);
+      const [year, month] = mes.split("-").map(Number);
+      const start = new Date(year, month - 1, 1);
+      const end   = new Date(year, month, 0, 23, 59, 59);
+      setOrdersDoMes(ordersData.filter(o => {
+        if (o.status === "cancelled") return false;
+        const d = new Date(o.created_at);
+        return d >= start && d <= end;
+      }));
+    } catch { toast.error("Erro ao carregar metas"); }
+    finally { setLoading(false); }
+  }, [mes]);
+
+  useEffect(() => {
+    if (isActive) load();
+  }, [isActive, load]);
+
+  const faturamentoReal = ordersDoMes.reduce((s, o) => s + Number(o.total), 0);
+  const pedidosReal     = ordersDoMes.length;
+
+  const pctFaturamento = meta?.meta_faturamento
+    ? Math.min(100, Math.round((faturamentoReal / meta.meta_faturamento) * 100))
+    : 0;
+  const pctPedidos = meta?.meta_pedidos
+    ? Math.min(100, Math.round((pedidosReal / meta.meta_pedidos) * 100))
+    : 0;
+
+  function startEdit() {
+    setEditFaturamento(meta?.meta_faturamento ? String(meta.meta_faturamento) : "");
+    setEditPedidos(meta?.meta_pedidos ? String(meta.meta_pedidos) : "");
+    setEditMode(true);
+  }
+
+  async function handleSave() {
+    const f = parseFloat(editFaturamento.replace(",", "."));
+    const p = parseInt(editPedidos, 10);
+    if (isNaN(f) || f < 0 || isNaN(p) || p < 0) { toast.error("Valores invalidos"); return; }
+    setSaving(true);
+    try {
+      const saved = await saveMeta({ mes, meta_faturamento: f, meta_pedidos: p });
+      setMeta(saved);
+      setEditMode(false);
+      toast.success("Metas salvas");
+    } catch { toast.error("Erro ao salvar metas"); }
+    finally { setSaving(false); }
+  }
+
+  function prevMes() {
+    const [y, m] = mes.split("-").map(Number);
+    const d = new Date(y, m - 2, 1);
+    setMes(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+  function nextMes() {
+    const [y, m] = mes.split("-").map(Number);
+    const d = new Date(y, m, 1);
+    setMes(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+
+  const mesLabel = new Date(mes + "-15").toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+
+  function ProgressBar({ value, done }: { value: number; done: boolean }) {
+    return (
+      <div className="h-2.5 bg-secondary rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all duration-500 ${
+            done ? "bg-green-500" : value >= 70 ? "bg-primary" : value >= 40 ? "bg-amber-500" : "bg-red-400"
+          }`}
+          style={{ width: `${value}%` }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-5 max-w-2xl">
+      {/* Navegacao de mes */}
+      <div className="flex items-center justify-between bg-background border border-border rounded-xl px-4 py-3">
+        <button onClick={prevMes} className="p-1.5 rounded-lg hover:bg-secondary transition-colors">
+          <ChevronLeft className="h-5 w-5" />
+        </button>
+        <p className="font-semibold capitalize text-sm">{mesLabel}</p>
+        <button onClick={nextMes} className="p-1.5 rounded-lg hover:bg-secondary transition-colors">
+          <ChevronRight className="h-5 w-5" />
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="p-12 text-center text-sm text-muted-foreground">
+          <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />Carregando...
+        </div>
+      ) : (
+        <>
+          {/* Cards de progresso */}
+          <div className="grid sm:grid-cols-2 gap-4">
+            {/* Faturamento */}
+            <div className="bg-background border border-border rounded-xl p-5 space-y-3">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Faturamento</p>
+                  <p className="text-2xl font-bold mt-1">{fmt(faturamentoReal)}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {meta?.meta_faturamento ? `meta: ${fmt(meta.meta_faturamento)}` : "Meta nao definida"}
+                  </p>
+                </div>
+                <span className={`text-sm font-bold shrink-0 mt-1 ${pctFaturamento >= 100 ? "text-green-600" : "text-primary"}`}>
+                  {meta?.meta_faturamento ? `${pctFaturamento}%` : "--"}
+                </span>
+              </div>
+              <ProgressBar value={pctFaturamento} done={pctFaturamento >= 100} />
+              {pctFaturamento >= 100 && (
+                <p className="text-xs font-semibold text-green-600">Meta atingida!</p>
+              )}
+            </div>
+
+            {/* Pedidos */}
+            <div className="bg-background border border-border rounded-xl p-5 space-y-3">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Pedidos</p>
+                  <p className="text-2xl font-bold mt-1">{pedidosReal}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {meta?.meta_pedidos ? `meta: ${meta.meta_pedidos} pedidos` : "Meta nao definida"}
+                  </p>
+                </div>
+                <span className={`text-sm font-bold shrink-0 mt-1 ${pctPedidos >= 100 ? "text-green-600" : "text-primary"}`}>
+                  {meta?.meta_pedidos ? `${pctPedidos}%` : "--"}
+                </span>
+              </div>
+              <ProgressBar value={pctPedidos} done={pctPedidos >= 100} />
+              {pctPedidos >= 100 && (
+                <p className="text-xs font-semibold text-green-600">Meta atingida!</p>
+              )}
+            </div>
+          </div>
+
+          {/* Formulario de edicao */}
+          {editMode ? (
+            <div className="bg-background border border-border rounded-xl p-5 space-y-4">
+              <h3 className="font-semibold text-sm">Definir metas — <span className="capitalize font-normal text-muted-foreground">{mesLabel}</span></h3>
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label>Meta de faturamento (R$)</Label>
+                  <Input type="number" min="0" value={editFaturamento} onChange={e => setEditFaturamento(e.target.value)} placeholder="Ex: 10000" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Meta de pedidos</Label>
+                  <Input type="number" min="0" value={editPedidos} onChange={e => setEditPedidos(e.target.value)} placeholder="Ex: 50" />
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Button onClick={handleSave} disabled={saving} className="gap-1.5">
+                  {saving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  Salvar metas
+                </Button>
+                <Button variant="outline" onClick={() => setEditMode(false)}>Cancelar</Button>
+              </div>
+            </div>
+          ) : (
+            <Button variant="outline" onClick={startEdit} className="gap-1.5">
+              <Pencil className="h-4 w-4" />
+              {meta ? "Editar metas" : "Definir metas do mes"}
+            </Button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Aba Cupons ───────────────────────────────────────────────────────────────
+function CuponsTab({ isActive }: { isActive: boolean }) {
+  const [cupons,  setCupons]  = useState<Cupom[]>([]);
+  const [loading, setLoading] = useState(false);
+  const loaded = useRef(false);
+
+  const [open,        setOpen]        = useState(false);
+  const [delId,       setDelId]       = useState<string | null>(null);
+  const [saving,      setSaving]      = useState(false);
+
+  // Form
+  const [codigo,      setCodigo]      = useState("");
+  const [tipo,        setTipo]        = useState<"percentual" | "fixo">("percentual");
+  const [valor,       setValor]       = useState("");
+  const [minValor,    setMinValor]    = useState("");
+  const [validade,    setValidade]    = useState("");
+  const [usosLimite,  setUsosLimite]  = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setCupons(await fetchCupons());
+      loaded.current = true;
+    } catch { toast.error("Erro ao carregar cupons"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (isActive && !loaded.current) load();
+  }, [isActive, load]);
+
+  function resetForm() {
+    setCodigo(""); setTipo("percentual"); setValor("");
+    setMinValor(""); setValidade(""); setUsosLimite("");
+  }
+
+  async function handleCreate() {
+    if (!codigo.trim()) { toast.error("Informe o codigo do cupom"); return; }
+    const v = parseFloat(valor.replace(",", "."));
+    if (isNaN(v) || v <= 0) { toast.error("Valor invalido"); return; }
+    setSaving(true);
+    try {
+      const input: CupomInput = {
+        codigo,
+        tipo,
+        valor: v,
+        valor_minimo: minValor ? parseFloat(minValor.replace(",", ".")) : null,
+        validade:     validade || null,
+        usos_limite:  usosLimite ? parseInt(usosLimite) : null,
+        ativo:        true,
+      };
+      const novo = await createCupom(input);
+      setCupons(prev => [novo, ...prev]);
+      toast.success("Cupom criado");
+      setOpen(false);
+      resetForm();
+    } catch { toast.error("Erro ao criar cupom"); }
+    finally { setSaving(false); }
+  }
+
+  async function handleToggle(c: Cupom) {
+    await toggleCupomAtivo(c.id, !c.ativo);
+    setCupons(prev => prev.map(x => x.id === c.id ? { ...x, ativo: !x.ativo } : x));
+  }
+
+  async function handleDelete() {
+    if (!delId) return;
+    await deleteCupom(delId);
+    setCupons(prev => prev.filter(x => x.id !== delId));
+    setDelId(null);
+    toast.success("Cupom removido");
+  }
+
+  const ativos   = cupons.filter(c => c.ativo).length;
+  const totalUsos = cupons.reduce((s, c) => s + c.usos_count, 0);
+
+  return (
+    <div className="space-y-4">
+      {/* Stats + ações */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex gap-3 flex-1">
+          <div className="bg-background border border-border rounded-xl px-4 py-2.5 text-sm">
+            <span className="text-muted-foreground">Ativos: </span>
+            <span className="font-bold">{ativos}</span>
+          </div>
+          <div className="bg-background border border-border rounded-xl px-4 py-2.5 text-sm">
+            <span className="text-muted-foreground">Usos totais: </span>
+            <span className="font-bold">{totalUsos}</span>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={() => { loaded.current = false; load(); }} className="gap-1.5">
+            <RefreshCw className="h-3.5 w-3.5" />Atualizar
+          </Button>
+          <Button size="sm" onClick={() => { resetForm(); setOpen(true); }} className="gap-1.5">
+            <Plus className="h-4 w-4" />Novo cupom
+          </Button>
+        </div>
+      </div>
+
+      {/* Tabela */}
+      <div className="bg-background rounded-xl border border-border overflow-hidden">
+        {loading ? (
+          <div className="p-12 text-center text-sm text-muted-foreground">
+            <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />Carregando...
+          </div>
+        ) : cupons.length === 0 ? (
+          <div className="p-12 text-center text-sm text-muted-foreground">Nenhum cupom cadastrado.</div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Codigo</TableHead>
+                <TableHead>Desconto</TableHead>
+                <TableHead className="hidden sm:table-cell">Pedido min.</TableHead>
+                <TableHead className="hidden sm:table-cell">Validade</TableHead>
+                <TableHead className="text-center">Usos</TableHead>
+                <TableHead className="text-center">Ativo</TableHead>
+                <TableHead className="text-right">Excluir</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {cupons.map(c => (
+                <TableRow key={c.id}>
+                  <TableCell>
+                    <span className="font-mono font-bold text-sm tracking-wider">{c.codigo}</span>
+                  </TableCell>
+                  <TableCell>
+                    <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
+                      c.tipo === "percentual" ? "bg-blue-100 text-blue-700" : "bg-purple-100 text-purple-700"
+                    }`}>
+                      {c.tipo === "percentual" ? <BadgePercent className="h-3 w-3" /> : <DollarSign className="h-3 w-3" />}
+                      {c.tipo === "percentual" ? `${c.valor}%` : `R$${c.valor.toFixed(2).replace(".",",")}`}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground hidden sm:table-cell">
+                    {c.valor_minimo ? `R$${c.valor_minimo.toFixed(2).replace(".",",")}` : "—"}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground hidden sm:table-cell">
+                    {c.validade ? new Date(c.validade + "T12:00:00").toLocaleDateString("pt-BR") : "—"}
+                  </TableCell>
+                  <TableCell className="text-center text-sm">
+                    {c.usos_count}{c.usos_limite ? `/${c.usos_limite}` : ""}
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <Switch checked={c.ativo} onCheckedChange={() => handleToggle(c)} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
+                      onClick={() => setDelId(c.id)}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+
+      {/* Dialog criar */}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader><DialogTitle>Novo cupom</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label>Codigo *</Label>
+              <Input value={codigo} onChange={e => setCodigo(e.target.value.toUpperCase())} placeholder="Ex: FARMA10" />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Tipo de desconto</Label>
+              <div className="grid grid-cols-2 gap-2">
+                {(["percentual","fixo"] as const).map(t => (
+                  <button key={t} onClick={() => setTipo(t)}
+                    className={`py-2 rounded-lg text-sm font-medium border transition-colors ${
+                      tipo === t ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground"
+                    }`}>
+                    {t === "percentual" ? "Porcentagem (%)" : "Valor fixo (R$)"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Valor do desconto *</Label>
+                <Input type="number" min="0" value={valor} onChange={e => setValor(e.target.value)}
+                  placeholder={tipo === "percentual" ? "Ex: 10" : "Ex: 50"} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Pedido minimo (R$)</Label>
+                <Input type="number" min="0" value={minValor} onChange={e => setMinValor(e.target.value)} placeholder="0" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Validade</Label>
+                <Input type="date" value={validade} onChange={e => setValidade(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Limite de usos</Label>
+                <Input type="number" min="1" value={usosLimite} onChange={e => setUsosLimite(e.target.value)} placeholder="Ilimitado" />
+              </div>
+            </div>
+            <Button className="w-full" onClick={handleCreate} disabled={saving}>
+              {saving ? <RefreshCw className="h-4 w-4 animate-spin mr-2" /> : null}
+              Criar cupom
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirm delete */}
+      <AlertDialog open={!!delId} onOpenChange={v => { if (!v) setDelId(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Excluir cupom?</AlertDialogTitle>
+            <AlertDialogDescription>Esta acao nao pode ser desfeita.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={handleDelete} className="bg-destructive hover:bg-destructive/90">Excluir</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+// ─── Aba Contas a Pagar/Receber ────────────────────────────────────────────────
+type ContaFiltro = "todos" | "pagar" | "receber" | "vencidas" | "pagas";
+
+function ContasTab({ isActive }: { isActive: boolean }) {
+  const [contas,  setContas]  = useState<Conta[]>([]);
+  const [loading, setLoading] = useState(false);
+  const loaded = useRef(false);
+  const [filtro, setFiltro]   = useState<ContaFiltro>("todos");
+  const [open,   setOpen]     = useState(false);
+  const [delId,  setDelId]    = useState<string | null>(null);
+  const [saving, setSaving]   = useState(false);
+
+  // Form
+  const [desc,      setDesc]      = useState("");
+  const [valor,     setValor]     = useState("");
+  const [tipo,      setTipo]      = useState<ContaTipo>("pagar");
+  const [venc,      setVenc]      = useState("");
+  const [categ,     setCateg]     = useState("");
+  const [obs,       setObs]       = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setContas(await fetchContas());
+      loaded.current = true;
+    } catch { toast.error("Erro ao carregar contas"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (isActive && !loaded.current) load();
+  }, [isActive, load]);
+
+  function resetForm() {
+    setDesc(""); setValor(""); setTipo("pagar");
+    setVenc(""); setCateg(""); setObs("");
+  }
+
+  async function handleCreate() {
+    if (!desc.trim() || !valor || !venc || !categ) { toast.error("Preencha todos os campos obrigatorios"); return; }
+    const v = parseFloat(valor.replace(",", "."));
+    if (isNaN(v) || v <= 0) { toast.error("Valor invalido"); return; }
+    setSaving(true);
+    try {
+      const input: ContaInput = { descricao: desc, valor: v, tipo, vencimento: venc, categoria: categ, observacao: obs };
+      const nova = await createConta(input);
+      setContas(prev => [...prev, nova].sort((a, b) => a.vencimento.localeCompare(b.vencimento)));
+      toast.success("Conta adicionada");
+      setOpen(false);
+      resetForm();
+    } catch { toast.error("Erro ao criar conta"); }
+    finally { setSaving(false); }
+  }
+
+  async function handleTogglePago(c: Conta) {
+    const newStatus = c.status === "pago" ? "pendente" : "pago";
+    await updateContaStatus(c.id, newStatus);
+    const today = new Date().toISOString().split("T")[0];
+    setContas(prev => prev.map(x => x.id === c.id
+      ? { ...x, status: newStatus === "pendente" && x.vencimento < today ? "vencido" : newStatus }
+      : x
+    ));
+    toast.success(newStatus === "pago" ? "Marcado como pago" : "Marcado como pendente");
+  }
+
+  async function handleDelete() {
+    if (!delId) return;
+    await deleteConta(delId);
+    setContas(prev => prev.filter(x => x.id !== delId));
+    setDelId(null);
+    toast.success("Conta removida");
+  }
+
+  const filtered = contas.filter(c => {
+    if (filtro === "pagar")    return c.tipo === "pagar"   && c.status !== "pago";
+    if (filtro === "receber")  return c.tipo === "receber" && c.status !== "pago";
+    if (filtro === "vencidas") return c.status === "vencido";
+    if (filtro === "pagas")    return c.status === "pago";
+    return true;
+  });
+
+  const totalPagar    = contas.filter(c => c.tipo === "pagar"   && c.status !== "pago").reduce((s, c) => s + Number(c.valor), 0);
+  const totalReceber  = contas.filter(c => c.tipo === "receber" && c.status !== "pago").reduce((s, c) => s + Number(c.valor), 0);
+  const totalVencidas = contas.filter(c => c.status === "vencido").length;
+  const saldo         = totalReceber - totalPagar;
+
+  const STATUS_BADGE: Record<string, string> = {
+    pendente: "bg-amber-100 text-amber-700",
+    pago:     "bg-green-100 text-green-700",
+    vencido:  "bg-red-100 text-red-700",
+  };
+  const STATUS_LABEL_C: Record<string, string> = { pendente: "Pendente", pago: "Pago", vencido: "Vencida" };
+
+  const FILTROS: { key: ContaFiltro; label: string }[] = [
+    { key: "todos",    label: "Todas"    },
+    { key: "pagar",    label: "A pagar"  },
+    { key: "receber",  label: "A receber"},
+    { key: "vencidas", label: "Vencidas" },
+    { key: "pagas",    label: "Pagas"    },
+  ];
+
+  const CATS = tipo === "pagar" ? CATEGORIAS_PAGAR : CATEGORIAS_RECEBER;
+
+  return (
+    <div className="space-y-4">
+      {/* Cards resumo */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {[
+          { label: "A pagar",  value: fmt(totalPagar),   color: "text-red-600",   bg: "bg-red-50",    icon: TrendingDown  },
+          { label: "A receber",value: fmt(totalReceber), color: "text-green-600", bg: "bg-green-50",  icon: TrendingUp    },
+          { label: "Vencidas", value: String(totalVencidas), color: totalVencidas > 0 ? "text-red-600" : "text-gray-400", bg: totalVencidas > 0 ? "bg-red-50" : "bg-gray-50", icon: CalendarClock },
+          { label: "Saldo prev.",value: fmt(saldo),      color: saldo >= 0 ? "text-green-600" : "text-red-600", bg: saldo >= 0 ? "bg-green-50" : "bg-red-50", icon: BarChart2 },
+        ].map(m => {
+          const Icon = m.icon;
+          return (
+            <div key={m.label} className="bg-background border border-border rounded-xl p-4">
+              <div className={`inline-flex items-center justify-center w-8 h-8 rounded-lg ${m.bg} mb-2`}>
+                <Icon className={`h-4 w-4 ${m.color}`} />
+              </div>
+              <p className="text-lg font-bold">{m.value}</p>
+              <p className="text-xs text-muted-foreground">{m.label}</p>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Filtros + Nova conta */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap gap-1.5 flex-1">
+          {FILTROS.map(f => (
+            <button key={f.key} onClick={() => setFiltro(f.key)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                filtro === f.key
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background border border-border text-muted-foreground hover:text-foreground"
+              }`}>
+              {f.label}
+              {f.key === "vencidas" && totalVencidas > 0 && (
+                <span className="ml-1.5 bg-red-500 text-white text-[10px] font-bold px-1 rounded-full">{totalVencidas}</span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={() => { loaded.current = false; load(); }} className="gap-1.5">
+            <RefreshCw className="h-3.5 w-3.5" />
+          </Button>
+          <Button size="sm" onClick={() => { resetForm(); setOpen(true); }} className="gap-1.5">
+            <Plus className="h-4 w-4" />Nova conta
+          </Button>
+        </div>
+      </div>
+
+      {/* Tabela */}
+      <div className="bg-background rounded-xl border border-border overflow-hidden">
+        {loading ? (
+          <div className="p-12 text-center text-sm text-muted-foreground">
+            <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />Carregando...
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="p-12 text-center text-sm text-muted-foreground">Nenhuma conta encontrada.</div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Descricao</TableHead>
+                <TableHead className="hidden sm:table-cell">Categoria</TableHead>
+                <TableHead>Valor</TableHead>
+                <TableHead>Vencimento</TableHead>
+                <TableHead className="text-center">Status</TableHead>
+                <TableHead className="text-right">Acoes</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.map(c => (
+                <TableRow key={c.id}>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${c.tipo === "pagar" ? "bg-red-500" : "bg-green-500"}`} />
+                      <div>
+                        <p className="font-medium text-sm">{c.descricao}</p>
+                        <p className="text-xs text-muted-foreground">{c.tipo === "pagar" ? "A pagar" : "A receber"}</p>
+                      </div>
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground hidden sm:table-cell">{c.categoria}</TableCell>
+                  <TableCell>
+                    <span className={`font-semibold text-sm ${c.tipo === "pagar" ? "text-red-600" : "text-green-600"}`}>
+                      {c.tipo === "pagar" ? "-" : "+"}{fmt(Number(c.valor))}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-sm">
+                    {new Date(c.vencimento + "T12:00:00").toLocaleDateString("pt-BR")}
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <span className={`inline-flex text-xs font-medium px-2 py-0.5 rounded-full ${STATUS_BADGE[c.status]}`}>
+                      {STATUS_LABEL_C[c.status]}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button size="sm" variant="ghost" onClick={() => handleTogglePago(c)}
+                        title={c.status === "pago" ? "Marcar como pendente" : "Marcar como pago"}>
+                        {c.status === "pago"
+                          ? <Ban className="h-4 w-4 text-muted-foreground" />
+                          : <BadgeCheck className="h-4 w-4 text-green-600" />}
+                      </Button>
+                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
+                        onClick={() => setDelId(c.id)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+
+      {/* Dialog nova conta */}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader><DialogTitle>Nova conta</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label>Tipo</Label>
+              <div className="grid grid-cols-2 gap-2">
+                {(["pagar","receber"] as const).map(t => (
+                  <button key={t} onClick={() => { setTipo(t); setCateg(""); }}
+                    className={`py-2 rounded-lg text-sm font-medium border transition-colors ${
+                      tipo === t ? "bg-primary text-primary-foreground border-primary" : "border-border text-muted-foreground"
+                    }`}>
+                    {t === "pagar" ? "Conta a pagar" : "Conta a receber"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Descricao *</Label>
+              <Input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Ex: Aluguel de março" />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Valor (R$) *</Label>
+                <Input type="number" min="0" value={valor} onChange={e => setValor(e.target.value)} placeholder="0,00" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Vencimento *</Label>
+                <Input type="date" value={venc} onChange={e => setVenc(e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Categoria *</Label>
+              <select value={categ} onChange={e => setCateg(e.target.value)}
+                className="w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-sm">
+                <option value="">Selecione...</option>
+                {CATS.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Observacao</Label>
+              <Input value={obs} onChange={e => setObs(e.target.value)} placeholder="Opcional" />
+            </div>
+            <Button className="w-full" onClick={handleCreate} disabled={saving}>
+              {saving ? <RefreshCw className="h-4 w-4 animate-spin mr-2" /> : null}
+              Adicionar conta
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={!!delId} onOpenChange={v => { if (!v) setDelId(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Excluir conta?</AlertDialogTitle>
+            <AlertDialogDescription>Esta acao nao pode ser desfeita.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={handleDelete} className="bg-destructive hover:bg-destructive/90">Excluir</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+// ─── Aba Comissoes ────────────────────────────────────────────────────────────
+function ComissoesTab({ isActive }: { isActive: boolean }) {
+  const now = new Date();
+  const [mes, setMes]       = useState(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`);
+  const [colaboradores, setColaboradores] = useState<Colaborador[]>([]);
+  const [orders,        setOrders]        = useState<Order[]>([]);
+  const [loading,       setLoading]       = useState(false);
+  // Inline edit de comissao_pct
+  const [editPct, setEditPct] = useState<Record<string, string>>({});
+  const [savingId, setSavingId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [cols, ords] = await Promise.all([fetchColaboradores(), fetchAllOrders()]);
+      setColaboradores(cols);
+      setOrders(ords);
+    } catch { toast.error("Erro ao carregar comissoes"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (isActive) load();
+  }, [isActive, load]);
+
+  const ordersDoMes = useMemo(() => {
+    const [year, month] = mes.split("-").map(Number);
+    const start = new Date(year, month - 1, 1);
+    const end   = new Date(year, month, 0, 23, 59, 59);
+    return orders.filter(o => {
+      if (o.status === "cancelled") return false;
+      const d = new Date(o.created_at);
+      return d >= start && d <= end;
+    });
+  }, [orders, mes]);
+
+  // Computa vendas por colaborador
+  const stats = useMemo(() => {
+    return colaboradores.map(col => {
+      const vendas = ordersDoMes.filter(o => o.vendedor_nome === col.nome);
+      const totalVendido = vendas.reduce((s, o) => s + Number(o.total), 0);
+      const pct = col.comissao_pct ?? 0;
+      return {
+        colaborador: col,
+        pedidos: vendas.length,
+        totalVendido,
+        comissaoPct: pct,
+        valorComissao: totalVendido * (pct / 100),
+      };
+    }).sort((a, b) => b.totalVendido - a.totalVendido);
+  }, [colaboradores, ordersDoMes]);
+
+  const totalComissoes = stats.reduce((s, r) => s + r.valorComissao, 0);
+
+  async function handleSavePct(col: Colaborador) {
+    const raw = editPct[col.id];
+    if (raw === undefined) return;
+    const pct = parseFloat(raw.replace(",", "."));
+    if (isNaN(pct) || pct < 0 || pct > 100) { toast.error("Percentual invalido (0-100)"); return; }
+    setSavingId(col.id);
+    try {
+      await restPatch("colaboradores", { column: "id", value: col.id }, { comissao_pct: pct });
+      setColaboradores(prev => prev.map(c => c.id === col.id ? { ...c, comissao_pct: pct } : c));
+      setEditPct(prev => { const n = { ...prev }; delete n[col.id]; return n; });
+      toast.success("Comissao atualizada");
+    } catch { toast.error("Erro ao salvar"); }
+    finally { setSavingId(null); }
+  }
+
+  function prevMes() {
+    const [y, m] = mes.split("-").map(Number);
+    const d = new Date(y, m - 2, 1);
+    setMes(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+  function nextMes() {
+    const [y, m] = mes.split("-").map(Number);
+    const d = new Date(y, m, 1);
+    setMes(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+
+  const mesLabel = new Date(mes + "-15").toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+
+  return (
+    <div className="space-y-4">
+      {/* Mes + total */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-1 bg-background border border-border rounded-xl px-3 py-2">
+          <button onClick={prevMes} className="p-1 rounded hover:bg-secondary transition-colors">
+            <ChevronLeft className="h-4 w-4" />
+          </button>
+          <span className="font-semibold text-sm capitalize px-2">{mesLabel}</span>
+          <button onClick={nextMes} className="p-1 rounded hover:bg-secondary transition-colors">
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="bg-background border border-border rounded-xl px-4 py-2.5 text-sm flex items-center gap-2">
+          <Award className="h-4 w-4 text-yellow-500" />
+          <span className="text-muted-foreground">Total de comissoes:</span>
+          <span className="font-bold">{fmt(totalComissoes)}</span>
+        </div>
+        <Button size="sm" variant="outline" onClick={load} className="gap-1.5 ml-auto">
+          <RefreshCw className="h-3.5 w-3.5" />Atualizar
+        </Button>
+      </div>
+
+      {/* Tabela */}
+      <div className="bg-background rounded-xl border border-border overflow-hidden">
+        {loading ? (
+          <div className="p-12 text-center text-sm text-muted-foreground">
+            <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />Carregando...
+          </div>
+        ) : colaboradores.length === 0 ? (
+          <div className="p-12 text-center text-sm text-muted-foreground">
+            Nenhum colaborador cadastrado. Adicione colaboradores primeiro.
+          </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Colaborador</TableHead>
+                <TableHead className="text-center">Pedidos</TableHead>
+                <TableHead className="text-right">Total vendido</TableHead>
+                <TableHead className="text-center">Comissao %</TableHead>
+                <TableHead className="text-right">Valor comissao</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {stats.map(({ colaborador: col, pedidos, totalVendido, comissaoPct, valorComissao }) => {
+                const isEditing  = editPct[col.id] !== undefined;
+                const isSaving   = savingId === col.id;
+                return (
+                  <TableRow key={col.id}>
+                    <TableCell>
+                      <p className="font-medium text-sm">{col.nome}</p>
+                      <p className="text-xs text-muted-foreground">{col.ativo ? "Ativo" : "Inativo"}</p>
+                    </TableCell>
+                    <TableCell className="text-center text-sm font-medium">{pedidos}</TableCell>
+                    <TableCell className="text-right font-semibold text-sm">{fmt(totalVendido)}</TableCell>
+                    <TableCell className="text-center">
+                      <div className="flex items-center justify-center gap-1.5">
+                        <input
+                          type="number" min="0" max="100" step="0.5"
+                          value={isEditing ? editPct[col.id] : comissaoPct}
+                          onChange={e => setEditPct(prev => ({ ...prev, [col.id]: e.target.value }))}
+                          className="w-16 text-center text-sm border border-input rounded-md px-2 py-1 bg-background"
+                        />
+                        <span className="text-xs text-muted-foreground">%</span>
+                        {isEditing && (
+                          <Button size="sm" className="h-7 px-2" onClick={() => handleSavePct(col)} disabled={isSaving}>
+                            {isSaving ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                          </Button>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <span className={`font-bold text-sm ${valorComissao > 0 ? "text-green-600" : "text-muted-foreground"}`}>
+                        {fmt(valorComissao)}
+                      </span>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Altere o % de comissao diretamente na tabela. O valor e calculado sobre o total vendido no mes.
+      </p>
+    </div>
+  );
+}
+
 // ─── Grupos de navegação da sidebar ──────────────────────────────────────────
 interface NavEntry { id: string; label: string; icon: LucideIcon }
 interface NavGroup { label: string; items: NavEntry[] }
@@ -2434,16 +3913,27 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "FINANCEIRO",
     items: [
-      { id: "fluxo-caixa",   label: "Fluxo de Caixa", icon: Wallet },
-      { id: "colaboradores", label: "Colaboradores",  icon: Users  },
+      { id: "fluxo-caixa",   label: "Fluxo de Caixa", icon: Wallet        },
+      { id: "contas",        label: "Contas",          icon: CreditCard    },
+      { id: "metas",         label: "Metas",           icon: Target        },
+      { id: "relatorios",    label: "Relatorios",      icon: FileBarChart2 },
+      { id: "comissoes",     label: "Comissoes",       icon: Award         },
+      { id: "colaboradores", label: "Colaboradores",   icon: Users         },
+    ],
+  },
+  {
+    label: "MARKETING",
+    items: [
+      { id: "cupons", label: "Cupons", icon: Tag },
     ],
   },
   {
     label: "CATÁLOGO",
     items: [
-      { id: "produtos", label: "Produtos",    icon: Package     },
-      { id: "secoes",   label: "Seções",      icon: LayoutList  },
-      { id: "banners",  label: "Banners",     icon: ImageIcon   },
+      { id: "estoque",  label: "Estoque",      icon: Boxes      },
+      { id: "produtos", label: "Produtos",     icon: Package    },
+      { id: "secoes",   label: "Secoes",       icon: LayoutList },
+      { id: "banners",  label: "Banners",      icon: ImageIcon  },
     ],
   },
 ];
@@ -2453,11 +3943,17 @@ const PAGE_TITLES: Record<string, { title: string; sub: string }> = {
   pedidos:   { title: "Gerenciar pedidos",      sub: "Visualize, filtre e atualize o status de cada pedido." },
   pdv:       { title: "Nova Venda — PDV",       sub: "Registre vendas presenciais rapidamente." },
   clientes:       { title: "Clientes",               sub: "Clientes cadastrados na plataforma." },
-  "fluxo-caixa":   { title: "Fluxo de Caixa",   sub: "Registre entradas e saídas e acompanhe o saldo." },
-  colaboradores:   { title: "Colaboradores",    sub: "Gerencie a equipe da farmácia." },
-  produtos:  { title: "Produtos",               sub: "Gerencie o catálogo de produtos." },
-  secoes:    { title: "Seções do carrossel",    sub: "Crie, renomeie e reordene seções da página inicial." },
-  banners:   { title: "Banners",                sub: "Imagens do carrossel principal (1200 × 400 px)." },
+  "fluxo-caixa":   { title: "Fluxo de Caixa",   sub: "Registre entradas e saidas e acompanhe o saldo." },
+  colaboradores:   { title: "Colaboradores",    sub: "Gerencie a equipe da farmacia." },
+  estoque:         { title: "Estoque",          sub: "Controle as quantidades de produtos e receba alertas de reposicao." },
+  metas:           { title: "Metas do mes",     sub: "Defina metas de faturamento e pedidos e acompanhe o progresso." },
+  relatorios:      { title: "Relatorios",       sub: "Analise vendas, produtos e colaboradores por periodo." },
+  cupons:          { title: "Cupons de desconto", sub: "Crie e gerencie codigos promocionais para seus clientes." },
+  contas:          { title: "Contas a pagar/receber", sub: "Controle seus compromissos financeiros e recebimentos." },
+  comissoes:       { title: "Comissoes",         sub: "Calcule automaticamente as comissoes dos colaboradores por mes." },
+  produtos:  { title: "Produtos",               sub: "Gerencie o catalogo de produtos." },
+  secoes:    { title: "Secoes do carrossel",    sub: "Crie, renomeie e reordene secoes da pagina inicial." },
+  banners:   { title: "Banners",                sub: "Imagens do carrossel principal (1200 x 400 px)." },
 };
 
 // ─── Dashboard principal ──────────────────────────────────────────────────────
@@ -2574,6 +4070,12 @@ function AdminDashboard() {
           {activeTab === "banners"      && <BannersTab      isActive={activeTab === "banners"}      />}
           {activeTab === "fluxo-caixa"   && <FluxoCaixaTab     isActive={activeTab === "fluxo-caixa"}   />}
           {activeTab === "colaboradores" && <ColaboradoresTab  isActive={activeTab === "colaboradores"} />}
+          {activeTab === "estoque"       && <EstoqueTab        isActive={activeTab === "estoque"}       />}
+          {activeTab === "relatorios"    && <RelatoriosTab     isActive={activeTab === "relatorios"}    />}
+          {activeTab === "metas"         && <MetasTab          isActive={activeTab === "metas"}         />}
+          {activeTab === "cupons"        && <CuponsTab         isActive={activeTab === "cupons"}        />}
+          {activeTab === "contas"        && <ContasTab         isActive={activeTab === "contas"}        />}
+          {activeTab === "comissoes"     && <ComissoesTab      isActive={activeTab === "comissoes"}     />}
         </main>
       </div>
     </div>

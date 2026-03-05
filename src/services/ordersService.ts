@@ -35,6 +35,7 @@ export interface OrderInput {
   payment_code?:        string | null;
   payment_qr_url?:      string | null;
   vendedor_nome?:       string | null;
+  cupom_codigo?:        string | null;
   items:                OrderItemInput[];
 }
 
@@ -69,6 +70,7 @@ export interface Order {
   payment_code:          string | null;
   payment_qr_url:        string | null;
   vendedor_nome:         string | null;
+  cupom_codigo:          string | null;
   created_at:            string;
   order_items:           OrderItem[];
 }
@@ -101,7 +103,8 @@ export async function createOrder(input: OrderInput): Promise<{ order: Order | n
       tracking_code:         null,
       payment_code:          input.payment_code ?? null,
       payment_qr_url:        input.payment_qr_url ?? null,
-      vendedor_nome:         input.vendedor_nome ?? null,
+      vendedor_nome:         input.vendedor_nome  ?? null,
+      cupom_codigo:          input.cupom_codigo   ?? null,
       created_at:            new Date().toISOString(),
       order_items:           input.items.map((i) => ({ ...i, id: crypto.randomUUID(), order_id: "" })),
     };
@@ -130,9 +133,10 @@ export async function createOrder(input: OrderInput): Promise<{ order: Order | n
       shipping_cost:         input.shipping_cost ?? 0,
       total:                 input.total,
       status:                "pending",
-      payment_code:          input.payment_code  ?? null,
+      payment_code:          input.payment_code   ?? null,
       payment_qr_url:        input.payment_qr_url ?? null,
       vendedor_nome:         input.vendedor_nome  ?? null,
+      cupom_codigo:          input.cupom_codigo   ?? null,
     });
 
     // 2. Insere os itens em lote

@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   ChevronRight, User, ShoppingBag, LogOut, CheckCircle2,
   Package, Loader2, AlertCircle, ChevronDown, ChevronUp, Edit3, Save,
-  Truck, Copy, Check, ExternalLink, Smartphone, FileText, XCircle,
+  Truck, Copy, Check, ExternalLink, Smartphone, FileText, XCircle, MapPin, Search,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { fetchUserOrders, updateOrderStatus, STATUS_LABEL, STATUS_COLOR } from "@/services/ordersService";
@@ -31,6 +31,10 @@ function maskPhone(v: string) {
     .replace(/(\d{2})(\d)/, "($1) $2")
     .replace(/(\d{5})(\d)/, "$1-$2");
 }
+function maskCEP(v: string) {
+  return v.replace(/\D/g, "").slice(0, 8)
+    .replace(/(\d{5})(\d)/, "$1-$2");
+}
 
 /* ── Abas ─────────────────────────────────────────────────────── */
 type Tab = "profile" | "orders";
@@ -38,26 +42,68 @@ type Tab = "profile" | "orders";
 /* ── Tab: Dados pessoais ─────────────────────────────────────── */
 function ProfileTab() {
   const { user, profile, updateProfile } = useAuth();
-  const [name,      setName]      = useState(profile?.name  ?? "");
-  const [cpf,       setCpf]       = useState(profile?.cpf   ?? "");
-  const [phone,     setPhone]     = useState(profile?.phone ?? "");
-  const [birthDate, setBirthDate] = useState(profile?.birth_date ?? "");
-  const [saving,    setSaving]    = useState(false);
-  const [success,   setSuccess]   = useState(false);
-  const [error,     setError]     = useState("");
+  const [name,         setName]         = useState(profile?.name  ?? "");
+  const [cpf,          setCpf]          = useState(profile?.cpf   ?? "");
+  const [phone,        setPhone]        = useState(profile?.phone ?? "");
+  const [birthDate,    setBirthDate]    = useState(profile?.birth_date ?? "");
+  // Endereço
+  const [addrCep,          setAddrCep]          = useState(profile?.address_cep ?? "");
+  const [addrStreet,       setAddrStreet]       = useState(profile?.address_street ?? "");
+  const [addrNumber,       setAddrNumber]       = useState(profile?.address_number ?? "");
+  const [addrComplement,   setAddrComplement]   = useState(profile?.address_complement ?? "");
+  const [addrNeighborhood, setAddrNeighborhood] = useState(profile?.address_neighborhood ?? "");
+  const [addrCity,         setAddrCity]         = useState(profile?.address_city ?? "");
+  const [addrState,        setAddrState]        = useState(profile?.address_state ?? "");
+  const [loadingCep,   setLoadingCep]   = useState(false);
+  const [saving,       setSaving]       = useState(false);
+  const [success,      setSuccess]      = useState(false);
+  const [error,        setError]        = useState("");
 
   useEffect(() => {
     if (profile?.name)       setName(profile.name);
     if (profile?.cpf)        setCpf(profile.cpf);
     if (profile?.phone)      setPhone(profile.phone);
     if (profile?.birth_date) setBirthDate(profile.birth_date);
+    if (profile?.address_cep)          setAddrCep(profile.address_cep);
+    if (profile?.address_street)       setAddrStreet(profile.address_street);
+    if (profile?.address_number)       setAddrNumber(profile.address_number);
+    if (profile?.address_complement)   setAddrComplement(profile.address_complement);
+    if (profile?.address_neighborhood) setAddrNeighborhood(profile.address_neighborhood);
+    if (profile?.address_city)         setAddrCity(profile.address_city);
+    if (profile?.address_state)        setAddrState(profile.address_state);
   }, [profile]);
+
+  async function handleCepSearch() {
+    const raw = addrCep.replace(/\D/g, "");
+    if (raw.length !== 8) return;
+    setLoadingCep(true);
+    try {
+      const res  = await fetch(`https://viacep.com.br/ws/${raw}/json/`);
+      const data = await res.json();
+      if (!data.erro) {
+        setAddrStreet(data.logradouro || "");
+        setAddrNeighborhood(data.bairro || "");
+        setAddrCity(data.localidade || "");
+        setAddrState(data.uf || "");
+      }
+    } catch { /* silencioso */ }
+    finally { setLoadingCep(false); }
+  }
 
   async function handleSave() {
     if (!name.trim()) { setError("O nome é obrigatório."); return; }
     setSaving(true);
     setError("");
-    const res = await updateProfile({ name, cpf, phone, birth_date: birthDate });
+    const res = await updateProfile({
+      name, cpf, phone, birth_date: birthDate,
+      address_cep:          addrCep          || null,
+      address_street:       addrStreet       || null,
+      address_number:       addrNumber       || null,
+      address_complement:   addrComplement   || null,
+      address_neighborhood: addrNeighborhood || null,
+      address_city:         addrCity         || null,
+      address_state:        addrState        || null,
+    });
     setSaving(false);
     if (res.error) { setError(res.error); return; }
     setSuccess(true);
@@ -66,8 +112,14 @@ function ProfileTab() {
 
   const inputCls = "w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm text-gray-800 placeholder-gray-300 focus:outline-none focus:border-[#e8001c] focus:ring-1 focus:ring-[#e8001c]/20 transition-colors";
 
+  const UF_OPTIONS = [
+    "AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS",
+    "MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC",
+    "SP","SE","TO",
+  ];
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       {/* Avatar / nome */}
       <div className="flex items-center gap-4 bg-gray-50 rounded-2xl p-4">
         <div className="w-14 h-14 rounded-full bg-[#e8001c] flex items-center justify-center text-white text-xl font-bold shrink-0">
@@ -79,28 +131,100 @@ function ProfileTab() {
         </div>
       </div>
 
-      {/* Formulário */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="sm:col-span-2">
-          <label className="text-xs font-medium text-gray-500 block mb-1">Nome completo *</label>
-          <input value={name} onChange={e=>setName(e.target.value)} placeholder="Seu nome completo" className={inputCls} />
+      {/* Dados pessoais */}
+      <div>
+        <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <User className="h-3.5 w-3.5" /> Dados pessoais
+        </h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="sm:col-span-2">
+            <label className="text-xs font-medium text-gray-500 block mb-1">Nome completo *</label>
+            <input value={name} onChange={e=>setName(e.target.value)} placeholder="Seu nome completo" className={inputCls} />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">E-mail</label>
+            <input value={user?.email ?? ""} disabled className={inputCls + " bg-gray-50 cursor-not-allowed text-gray-400"} />
+            <p className="text-[11px] text-gray-400 mt-1">O e-mail não pode ser alterado.</p>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">CPF</label>
+            <input value={cpf} onChange={e=>setCpf(maskCPF(e.target.value))} placeholder="000.000.000-00" className={inputCls} />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Telefone / WhatsApp</label>
+            <input value={phone} onChange={e=>setPhone(maskPhone(e.target.value))} placeholder="(00) 00000-0000" className={inputCls} />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Data de nascimento</label>
+            <input type="date" value={birthDate} onChange={e=>setBirthDate(e.target.value)} className={inputCls} />
+          </div>
         </div>
-        <div>
-          <label className="text-xs font-medium text-gray-500 block mb-1">E-mail</label>
-          <input value={user?.email ?? ""} disabled className={inputCls + " bg-gray-50 cursor-not-allowed text-gray-400"} />
-          <p className="text-[11px] text-gray-400 mt-1">O e-mail não pode ser alterado.</p>
-        </div>
-        <div>
-          <label className="text-xs font-medium text-gray-500 block mb-1">CPF</label>
-          <input value={cpf} onChange={e=>setCpf(maskCPF(e.target.value))} placeholder="000.000.000-00" className={inputCls} />
-        </div>
-        <div>
-          <label className="text-xs font-medium text-gray-500 block mb-1">Telefone</label>
-          <input value={phone} onChange={e=>setPhone(maskPhone(e.target.value))} placeholder="(00) 00000-0000" className={inputCls} />
-        </div>
-        <div>
-          <label className="text-xs font-medium text-gray-500 block mb-1">Data de nascimento</label>
-          <input type="date" value={birthDate} onChange={e=>setBirthDate(e.target.value)} className={inputCls} />
+      </div>
+
+      {/* Endereço de entrega */}
+      <div>
+        <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <MapPin className="h-3.5 w-3.5" /> Endereço de entrega
+        </h3>
+        <p className="text-xs text-gray-400 mb-4">Salve seu endereço para agilizar suas compras. Ele será preenchido automaticamente no checkout.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {/* CEP */}
+          <div className="sm:col-span-2">
+            <label className="text-xs font-medium text-gray-500 block mb-1">CEP</label>
+            <div className="flex gap-2">
+              <input
+                value={addrCep}
+                onChange={e => setAddrCep(maskCEP(e.target.value))}
+                onKeyDown={e => e.key === "Enter" && handleCepSearch()}
+                placeholder="00000-000"
+                maxLength={9}
+                className={inputCls}
+              />
+              <button
+                onClick={handleCepSearch}
+                disabled={loadingCep || addrCep.replace(/\D/g,"").length !== 8}
+                className="px-4 py-2.5 bg-[#e8001c] hover:bg-[#c4001a] text-white text-sm font-semibold rounded-xl transition-colors disabled:opacity-50 shrink-0 flex items-center gap-1.5"
+              >
+                {loadingCep
+                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : <Search className="h-4 w-4" />}
+                Buscar
+              </button>
+            </div>
+          </div>
+          {/* Logradouro */}
+          <div className="sm:col-span-2">
+            <label className="text-xs font-medium text-gray-500 block mb-1">Logradouro (rua, av...)</label>
+            <input value={addrStreet} onChange={e=>setAddrStreet(e.target.value)} placeholder="Rua Exemplo" className={inputCls} />
+          </div>
+          {/* Número e Complemento */}
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Número</label>
+            <input value={addrNumber} onChange={e=>setAddrNumber(e.target.value)} placeholder="123" className={inputCls} />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Complemento <span className="text-gray-300">(opcional)</span></label>
+            <input value={addrComplement} onChange={e=>setAddrComplement(e.target.value)} placeholder="Apto 4, Bloco B..." className={inputCls} />
+          </div>
+          {/* Bairro */}
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Bairro</label>
+            <input value={addrNeighborhood} onChange={e=>setAddrNeighborhood(e.target.value)} placeholder="Centro" className={inputCls} />
+          </div>
+          {/* Cidade */}
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Cidade</label>
+            <input value={addrCity} onChange={e=>setAddrCity(e.target.value)} placeholder="Sua cidade" className={inputCls} />
+          </div>
+          {/* Estado */}
+          <div>
+            <label className="text-xs font-medium text-gray-500 block mb-1">Estado (UF)</label>
+            <select value={addrState} onChange={e=>setAddrState(e.target.value)}
+              className={inputCls + " appearance-none bg-white"}>
+              <option value="">Selecione...</option>
+              {UF_OPTIONS.map(uf => <option key={uf} value={uf}>{uf}</option>)}
+            </select>
+          </div>
         </div>
       </div>
 

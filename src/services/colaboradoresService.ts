@@ -9,12 +9,14 @@ export interface ColaboradorInput {
   data_admissao?: string | null; // YYYY-MM-DD
   observacao?:    string;
   ativo?:         boolean;
+  comissao_pct?:  number | null; // % de comissao sobre vendas
 }
 
 export interface Colaborador extends ColaboradorInput {
-  id:         string;
-  ativo:      boolean;
-  created_at: string;
+  id:           string;
+  ativo:        boolean;
+  comissao_pct: number;
+  created_at:   string;
 }
 
 /* ── fetch ──────────────────────────────────────────────────────────── */
@@ -42,6 +44,7 @@ export async function createColaborador(
       salario:       input.salario       ?? null,
       data_admissao: input.data_admissao ?? null,
       observacao:    input.observacao    ?? null,
+      comissao_pct:  input.comissao_pct  ?? 0,
       ativo:         true,
     });
     return { colaborador: row };
