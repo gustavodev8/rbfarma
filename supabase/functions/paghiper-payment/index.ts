@@ -1,14 +1,22 @@
 // ============================================================
-// RB FARMA — Edge Function: paghiper-payment
+// Edge Function: paghiper-payment (white-label)
 // Cole este código no painel Supabase > Edge Functions
 // Nome da função: paghiper-payment
+//
+// Variáveis de ambiente necessárias (Supabase > Settings > Secrets):
+//   PAGHIPER_KEY        → Chave da API PagHiper do cliente
+//   PAGHIPER_TOKEN      → Token PagHiper do cliente
+//   NOTIFICATION_URL    → URL do webhook (ex: https://cliente.com.br/webhook/paghiper)
+//   STORE_NAME          → Nome da loja (ex: Farmácia Central)
 // ============================================================
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
-// Credenciais PagHiper
-const PAGHIPER_KEY   = "apk_40129856-VzoiNCQOJhzbRIgdYspbDkGyagtfoikY";
-const PAGHIPER_TOKEN = "ZL7J3BC8S4R834T99IU0S08E28LIFAMNCB14BIVOI5YC";
+// Credenciais lidas dos Secrets do Supabase — nunca hardcode aqui
+const PAGHIPER_KEY     = Deno.env.get("PAGHIPER_KEY")     ?? "";
+const PAGHIPER_TOKEN   = Deno.env.get("PAGHIPER_TOKEN")   ?? "";
+const NOTIFICATION_URL = Deno.env.get("NOTIFICATION_URL") ?? "";
+const STORE_NAME       = Deno.env.get("STORE_NAME")       ?? "Pedido";
 
 const TIMEOUT_MS = 20_000;
 
@@ -65,10 +73,10 @@ serve(async (req) => {
       payer_city:       customer.city,
       payer_state:      customer.state,
       payer_zip_code:   cep,
-      notification_url: "https://rbfarma.com.br/webhook/paghiper",
+      ...(NOTIFICATION_URL ? { notification_url: NOTIFICATION_URL } : {}),
       days_due_date:    1,
       items: [{
-        description: `Pedido RB FARMA - ${payment.orderNumber}`,
+        description: `Pedido ${STORE_NAME} - ${payment.orderNumber}`,
         quantity:    "1",
         item_id:     "1",
         price_cents: String(cents),
@@ -82,8 +90,8 @@ serve(async (req) => {
       const req  = data?.pix_create_request ?? data?.create_request;
 
       if (!req || req.result !== "success") {
-        const msg = req?.response_message ?? JSON.stringify(data);
-        return json({ error: `PagHiper PIX: ${msg}` }, 400);
+        const raw = req?.response_message ?? "Erro ao processar pagamento";
+        return json({ error: friendlyPaymentError(raw) }, 400);
       }
 
       return json({
@@ -100,8 +108,8 @@ serve(async (req) => {
       const req  = data?.create_request;
 
       if (!req || req.result !== "success") {
-        const msg = req?.response_message ?? JSON.stringify(data);
-        return json({ error: `PagHiper Boleto: ${msg}` }, 400);
+        const raw = req?.response_message ?? "Erro ao processar pagamento";
+        return json({ error: friendlyPaymentError(raw) }, 400);
       }
 
       return json({
@@ -120,6 +128,24 @@ serve(async (req) => {
     return json({ error: msg }, 500);
   }
 });
+
+function friendlyPaymentError(raw: string): string {
+  const normalized = raw.toLowerCase().trim();
+  if (normalized.includes("cpf") || normalized.includes("cnpj") || normalized.includes("payer_cpf"))
+    return "CPF ou CNPJ inválido. Confira os dados e tente novamente.";
+  if (normalized.includes("payer_email") || normalized.includes("email"))
+    return "E-mail inválido. Confira o endereço e tente novamente.";
+  if (normalized.includes("payer_phone") || normalized.includes("phone"))
+    return "Telefone inválido. Informe um número com DDD.";
+  if (normalized.includes("payer_zip") || normalized.includes("cep"))
+    return "CEP inválido. Confira o endereço e tente novamente.";
+  if (normalized.includes("duplicate") || normalized.includes("duplicado"))
+    return "Pedido duplicado. Aguarde alguns minutos e tente novamente.";
+  if (normalized.includes("valor") || normalized.includes("amount") || normalized.includes("cents"))
+    return "Valor do pedido inválido. Entre em contato com o suporte.";
+  // fallback legível
+  return "Não foi possível processar o pagamento. Verifique os dados e tente novamente.";
+}
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {

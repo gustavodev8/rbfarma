@@ -58,6 +58,41 @@ async function mockPayment(payment: PaymentInfo): Promise<PaymentResult> {
 }
 
 /* ─────────────────────────────────────────────────────────────
+   Traduz mensagens técnicas do PagHiper para texto amigável
+───────────────────────────────────────────────────────────── */
+function friendlyPaymentError(raw: string): string {
+  // Tenta extrair response_message de um JSON embutido na string
+  try {
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const inner  = parsed?.pix_create_request ?? parsed?.create_request ?? parsed;
+      const msg    = inner?.response_message as string | undefined;
+      if (msg) return friendlyPaymentError(msg); // recursão com string limpa
+    }
+  } catch { /* ignora parse error */ }
+
+  const normalized = raw.toLowerCase().trim();
+  if (normalized.includes("cpf") || normalized.includes("cnpj") || normalized.includes("payer_cpf"))
+    return "CPF ou CNPJ inválido. Confira os dados e tente novamente.";
+  if (normalized.includes("payer_email") || normalized.includes("email"))
+    return "E-mail inválido. Confira o endereço e tente novamente.";
+  if (normalized.includes("payer_phone") || normalized.includes("phone"))
+    return "Telefone inválido. Informe um número com DDD.";
+  if (normalized.includes("payer_zip") || normalized.includes("cep"))
+    return "CEP inválido. Confira o endereço e tente novamente.";
+  if (normalized.includes("duplicate") || normalized.includes("duplicado"))
+    return "Pedido duplicado. Aguarde alguns minutos e tente novamente.";
+  if (normalized.includes("valor") || normalized.includes("amount") || normalized.includes("cents"))
+    return "Valor do pedido inválido. Entre em contato com o suporte.";
+  if (normalized.includes("timeout") || normalized.includes("não respondeu"))
+    return "Servidor de pagamentos não respondeu. Tente novamente em instantes.";
+  if (normalized.startsWith("paghiper"))
+    return "Não foi possível processar o pagamento. Verifique os dados e tente novamente.";
+  return raw; // já é uma mensagem amigável — retorna como está
+}
+
+/* ─────────────────────────────────────────────────────────────
    createPayment — fetch direto à Edge Function (mais confiável)
 ───────────────────────────────────────────────────────────── */
 const FUNCTION_URL =
@@ -128,7 +163,7 @@ export async function createPayment(
         } catch { /* ignora parse error */ }
       }
       console.error("[paymentService] Erro PagHiper:", errMsg);
-      return { error: errMsg };
+      return { error: friendlyPaymentError(errMsg) };
     }
 
     console.info("[paymentService] Sucesso:", data);

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
+import { STORE_NAME } from "@/config/storeConfig";
 import { supabase } from "@/services/supabaseClient";
 import { fetchAllProducts, toggleProductActive, deleteProduct } from "@/services/productsService";
 import {
@@ -31,6 +32,10 @@ import { fetchEstoque, ajustarEstoque } from "@/services/estoqueService";
 import type { EstoqueProduto } from "@/services/estoqueService";
 import { fetchMeta, saveMeta } from "@/services/metasService";
 import type { Meta } from "@/services/metasService";
+import {
+  fetchConfig, saveConfigCartao, calcularParcelas,
+} from "@/services/configService";
+import type { AppConfig, ConfigCartao } from "@/services/configService";
 import {
   fetchCupons, createCupom, toggleCupomAtivo, deleteCupom,
 } from "@/services/cuponsService";
@@ -70,13 +75,36 @@ import {
   Wallet, ArrowUpCircle, ArrowDownCircle, CalendarDays,
   UserPlus, UserCheck, UserX, Target, FileBarChart2, Boxes,
   Tag, BadgePercent, DollarSign, CalendarClock, Award, BadgeCheck,
-  Ban, CreditCard, FileDown,
+  Ban, CreditCard, FileDown, Settings, SlidersHorizontal, MessageSquare,
+  Smartphone, Building2, Landmark, CalendarCheck, Hash, PhoneCall,
+  LockKeyhole, LockKeyholeOpen, Banknote, AlertTriangle,
+  KeyRound, ShieldCheck, ShieldOff, ShieldAlert, Eye, EyeOff,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 import { gerarRelatorioPDF } from "@/services/pdfService";
 import type { PDFSecoes } from "@/services/pdfService";
+import { gerarRecibo } from "@/services/receiptService";
+import type { ReceiptData } from "@/services/receiptService";
+import {
+  fetchFornecedores, createFornecedor, updateFornecedor,
+} from "@/services/fornecedoresService";
+import type { Fornecedor, FornecedorInput } from "@/services/fornecedoresService";
+import {
+  fetchUserRole, fetchColaboradorAcesso,
+  createColaboradorUser, updatePermissoes, toggleAcesso,
+  updatePassword, deleteColaboradorUser, gerarSenhaAleatoria,
+  ABAS_COLABORADOR,
+} from "@/services/userRolesService";
+import type { UserRole } from "@/services/userRolesService";
+import {
+  fetchOuCriarCaixaHoje, fetchFechamentos, fetchCaixasPendentes,
+  salvarCaixa, calcularResumoHoje,
+} from "@/services/caixaService";
+import type { CaixaFechamento } from "@/services/caixaService";
+import { produtosVencendoEm } from "@/services/estoqueService";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 
 // ─── Formatadores ─────────────────────────────────────────────────────────────
 const fmt = (v: number) => v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
@@ -139,14 +167,14 @@ function LoginForm() {
         <div className="flex flex-col items-center gap-2">
           <div className="flex items-center gap-2">
             <Heart className="h-8 w-8 text-primary" fill="currentColor" />
-            <span className="text-2xl font-extrabold text-primary tracking-tight">RB FARMA</span>
+            <span className="text-2xl font-extrabold text-primary tracking-tight">{STORE_NAME}</span>
           </div>
           <p className="text-sm text-muted-foreground">Painel Administrativo</p>
         </div>
         <form onSubmit={handleLogin} className="space-y-4">
           <div className="space-y-1">
             <Label htmlFor="email">E-mail</Label>
-            <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@rbfarma.com.br" required />
+            <Input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@sualojaaqui.com.br" required />
           </div>
           <div className="space-y-1">
             <Label htmlFor="password">Senha</Label>
@@ -189,15 +217,35 @@ function StatusIcon({ status }: { status: Order["status"] }) {
 
 // ─── Aba Dashboard ────────────────────────────────────────────────────────────
 function DashboardTab({ isActive }: { isActive: boolean }) {
-  const [orders, setOrders]   = useState<Order[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [orders,   setOrders]   = useState<Order[]>([]);
+  const [lowStock, setLowStock] = useState<EstoqueProduto[]>([]);
+  const [meta,     setMeta]     = useState<Meta | null>(null);
+  const [fluxoMes, setFluxoMes] = useState<{ entradas: number; saidas: number }>({ entradas: 0, saidas: 0 });
+  const [loading,  setLoading]  = useState(false);
   const loaded = useRef(false);
 
   const loadOrders = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchAllOrders();
-      setOrders(data);
+      const now = new Date();
+      const mes = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      const [ordersData, estoqueData, metaData, fluxoData] = await Promise.all([
+        fetchAllOrders(),
+        fetchEstoque(),
+        fetchMeta(mes),
+        fetchFluxoCombinado(mes),
+      ]);
+      setOrders(ordersData);
+      setLowStock(
+        estoqueData
+          .filter(p => p.is_active && p.stock <= p.stock_min)
+          .sort((a, b) => a.stock - b.stock)
+          .slice(0, 6),
+      );
+      setMeta(metaData);
+      const entradas = fluxoData.filter(f => f.tipo === "entrada").reduce((s, f) => s + f.valor, 0);
+      const saidas   = fluxoData.filter(f => f.tipo === "saida").reduce((s, f) => s + f.valor, 0);
+      setFluxoMes({ entradas, saidas });
       loaded.current = true;
     } catch { /* silencioso */ }
     finally { setLoading(false); }
@@ -223,6 +271,12 @@ function DashboardTab({ isActive }: { isActive: boolean }) {
     : 0;
 
   const recentOrders = [...orders].slice(0, 6);
+
+  const pctFat = meta && meta.meta_faturamento > 0 ? (revenueMonth / meta.meta_faturamento) * 100 : 0;
+  const pctPed = meta && meta.meta_pedidos     > 0 ? (monthOrders.length / meta.meta_pedidos) * 100 : 0;
+
+  const barColor = (pct: number) =>
+    pct >= 100 ? "bg-green-500" : pct >= 70 ? "bg-primary" : pct >= 40 ? "bg-amber-500" : "bg-red-400";
 
   const statusCounts: Record<Order["status"], number> = {
     pending: 0, processing: 0, shipped: 0, delivered: 0, cancelled: 0,
@@ -351,6 +405,106 @@ function DashboardTab({ isActive }: { isActive: boolean }) {
           </div>
         </div>
       </div>
+
+      {/* ── Meta do mês + Estoque critico ─────────────────────────── */}
+      {(meta || lowStock.length > 0) && (
+        <div className="grid lg:grid-cols-2 gap-4">
+
+          {/* Meta do mês */}
+          {meta && (
+            <div className="bg-background rounded-xl border border-border overflow-hidden">
+              <div className="px-5 py-4 border-b border-border flex items-center gap-2">
+                <Target className="h-4 w-4 text-primary" />
+                <h3 className="font-semibold text-sm">Meta do mês</h3>
+                <span className="ml-auto text-xs text-muted-foreground">
+                  {new Date().toLocaleString("pt-BR", { month: "long", year: "numeric" })}
+                </span>
+              </div>
+              <div className="p-5 space-y-5">
+                <div>
+                  <div className="flex items-center justify-between mb-1.5 text-xs">
+                    <span className="text-muted-foreground">Faturamento</span>
+                    <span className="font-medium">{fmt(revenueMonth)} / {fmt(meta.meta_faturamento)}</span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full transition-all ${barColor(pctFat)}`}
+                      style={{ width: `${Math.min(100, pctFat)}%` }} />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">{pctFat.toFixed(1)}% atingido</p>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1.5 text-xs">
+                    <span className="text-muted-foreground">Pedidos</span>
+                    <span className="font-medium">{monthOrders.length} / {meta.meta_pedidos}</span>
+                  </div>
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full transition-all ${barColor(pctPed)}`}
+                      style={{ width: `${Math.min(100, pctPed)}%` }} />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">{pctPed.toFixed(1)}% atingido</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Estoque critico */}
+          {lowStock.length > 0 && (
+            <div className="bg-background rounded-xl border border-border overflow-hidden">
+              <div className="px-5 py-4 border-b border-border flex items-center gap-2">
+                <Boxes className="h-4 w-4 text-amber-600" />
+                <h3 className="font-semibold text-sm">Estoque critico</h3>
+                <span className="ml-auto text-[11px] font-medium text-amber-600">
+                  {lowStock.filter(p => p.stock === 0).length > 0
+                    ? `${lowStock.filter(p => p.stock === 0).length} esgotado(s)`
+                    : `${lowStock.length} com estoque baixo`}
+                </span>
+              </div>
+              <div className="divide-y divide-border">
+                {lowStock.map(p => (
+                  <div key={p.id} className="px-5 py-3 flex items-center gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium truncate">{p.name}</p>
+                      <p className="text-[11px] text-muted-foreground">{p.brand}</p>
+                    </div>
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                      p.stock === 0 ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"
+                    }`}>
+                      {p.stock === 0 ? "Esgotado" : `${p.stock} un.`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Resumo financeiro do mês ──────────────────────────────── */}
+      <div className="bg-background rounded-xl border border-border overflow-hidden">
+        <div className="px-5 py-4 border-b border-border flex items-center gap-2">
+          <Wallet className="h-4 w-4 text-primary" />
+          <h3 className="font-semibold text-sm">Resumo financeiro</h3>
+          <span className="ml-auto text-xs text-muted-foreground">
+            {new Date().toLocaleString("pt-BR", { month: "long", year: "numeric" })}
+          </span>
+        </div>
+        <div className="p-5 grid grid-cols-3 gap-4">
+          <div className="text-center">
+            <p className="text-[11px] text-muted-foreground mb-1">Entradas</p>
+            <p className="text-lg font-bold text-green-600">{fmt(fluxoMes.entradas)}</p>
+          </div>
+          <div className="text-center">
+            <p className="text-[11px] text-muted-foreground mb-1">Saidas</p>
+            <p className="text-lg font-bold text-red-500">{fmt(fluxoMes.saidas)}</p>
+          </div>
+          <div className="text-center">
+            <p className="text-[11px] text-muted-foreground mb-1">Saldo</p>
+            <p className={`text-lg font-bold ${fluxoMes.entradas - fluxoMes.saidas >= 0 ? "text-green-600" : "text-red-500"}`}>
+              {fmt(fluxoMes.entradas - fluxoMes.saidas)}
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -366,7 +520,7 @@ const STATUS_OPTIONS: { value: Order["status"]; label: string }[] = [
   { value: "cancelled",  label: "Cancelado" },
 ];
 
-function AdminOrdersTab({ isActive }: { isActive: boolean }) {
+function AdminOrdersTab({ isActive, isAdmin = true }: { isActive: boolean; isAdmin?: boolean }) {
   const [orders, setOrders]           = useState<Order[]>([]);
   const [loading, setLoading]         = useState(false);
   const loaded = useRef(false);
@@ -630,7 +784,7 @@ function AdminOrdersTab({ isActive }: { isActive: boolean }) {
                             </ul>
                           </div>
 
-                          {/* Entrega + Resumo */}
+                          {/* Entrega + Contato */}
                           <div className="space-y-4">
                             <div>
                               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">
@@ -652,17 +806,109 @@ function AdminOrdersTab({ isActive }: { isActive: boolean }) {
                               <p className="text-xs text-foreground">{order.customer_phone}</p>
                               <p className="text-xs text-muted-foreground">CPF: {order.customer_cpf}</p>
                             </div>
-                            <div className="bg-background rounded-lg border border-border p-3 space-y-1">
-                              <div className="flex justify-between text-xs text-muted-foreground">
-                                <span>Subtotal</span><span>{fmt(Number(order.subtotal))}</span>
+                          </div>
+
+                          {/* ── Resumo financeiro ── */}
+                          <div className="sm:col-span-2 bg-background border border-border rounded-xl overflow-hidden">
+                            <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                                <DollarSign className="h-3.5 w-3.5" /> Resumo financeiro
+                              </p>
+                              {/* Forma de pagamento em destaque */}
+                              <div className={`flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full ${
+                                order.payment_method === "pix"    ? "bg-green-100 text-green-700" :
+                                order.payment_method === "boleto" ? "bg-orange-100 text-orange-700" :
+                                "bg-blue-100 text-blue-700"
+                              }`}>
+                                {order.payment_method === "pix"    ? <Smartphone className="h-3 w-3" /> :
+                                 order.payment_method === "boleto" ? <FileDown className="h-3 w-3" /> :
+                                 <CreditCard className="h-3 w-3" />}
+                                {order.payment_method === "pix"    ? "PIX" :
+                                 order.payment_method === "boleto" ? "Boleto" :
+                                 order.payment_installments > 1
+                                   ? `Cartão ${order.payment_installments}x de ${fmt(Number(order.total) / order.payment_installments)}`
+                                   : "Cartão à vista"}
                               </div>
-                              {Number(order.discount) > 0 && (
-                                <div className="flex justify-between text-xs text-green-600">
-                                  <span>Desconto</span><span>-{fmt(Number(order.discount))}</span>
+                            </div>
+
+                            <div className="px-4 py-3 grid sm:grid-cols-2 gap-x-8 gap-y-0.5">
+                              {/* Coluna esquerda — cálculo */}
+                              <div className="space-y-1.5">
+                                <div className="flex justify-between text-xs text-muted-foreground">
+                                  <span>Subtotal</span>
+                                  <span>{fmt(Number(order.subtotal))}</span>
                                 </div>
-                              )}
-                              <div className="flex justify-between text-xs font-bold text-foreground border-t border-border pt-1 mt-1">
-                                <span>Total</span><span>{fmt(Number(order.total))}</span>
+                                {Number(order.discount) > 0 && (
+                                  <div className="flex justify-between text-xs text-green-600">
+                                    <span>
+                                      Desconto
+                                      {order.cupom_codigo && (
+                                        <span className="ml-1.5 bg-green-100 text-green-700 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase">
+                                          {order.cupom_codigo}
+                                        </span>
+                                      )}
+                                    </span>
+                                    <span>-{fmt(Number(order.discount))}</span>
+                                  </div>
+                                )}
+                                {Number(order.shipping_cost) > 0 ? (
+                                  <div className="flex justify-between text-xs text-muted-foreground">
+                                    <span>Frete</span>
+                                    <span>{fmt(Number(order.shipping_cost))}</span>
+                                  </div>
+                                ) : (
+                                  <div className="flex justify-between text-xs text-green-600">
+                                    <span>Frete</span>
+                                    <span>Grátis</span>
+                                  </div>
+                                )}
+                                <div className="flex justify-between text-sm font-bold text-foreground border-t border-border pt-2 mt-1">
+                                  <span>Total</span>
+                                  <span>{fmt(Number(order.total))}</span>
+                                </div>
+                                {order.payment_installments > 1 && (
+                                  <div className="flex justify-between text-xs text-muted-foreground">
+                                    <span>{order.payment_installments}x de</span>
+                                    <span className="font-medium">{fmt(Number(order.total) / order.payment_installments)}</span>
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Coluna direita — informações extras */}
+                              <div className="space-y-1.5 mt-3 sm:mt-0 pt-3 sm:pt-0 border-t sm:border-t-0 sm:border-l border-border sm:pl-8">
+                                {order.vendedor_nome && (
+                                  <div className="flex items-center gap-2 text-xs">
+                                    <span className="text-muted-foreground w-16 shrink-0">Vendedor</span>
+                                    <span className="font-medium text-foreground">{order.vendedor_nome}</span>
+                                  </div>
+                                )}
+                                <div className="flex items-center gap-2 text-xs">
+                                  <span className="text-muted-foreground w-16 shrink-0">Canal</span>
+                                  <span className="font-medium text-foreground">
+                                    {order.vendedor_nome ? "PDV — Presencial" : "Loja Online"}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-2 text-xs">
+                                  <span className="text-muted-foreground w-16 shrink-0">Status</span>
+                                  <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full ${STATUS_COLOR[order.status]}`}>
+                                    <StatusIcon status={order.status} />
+                                    {STATUS_LABEL[order.status]}
+                                  </span>
+                                </div>
+                                {order.cupom_codigo && !Number(order.discount) && (
+                                  <div className="flex items-center gap-2 text-xs">
+                                    <span className="text-muted-foreground w-16 shrink-0">Cupom</span>
+                                    <span className="bg-green-100 text-green-700 text-[10px] font-bold px-1.5 py-0.5 rounded uppercase">{order.cupom_codigo}</span>
+                                  </div>
+                                )}
+                                {(order as Order & { observacoes?: string | null }).observacoes && (
+                                  <div className="flex items-start gap-2 text-xs mt-1">
+                                    <span className="text-muted-foreground w-16 shrink-0 pt-0.5">Obs.</span>
+                                    <span className="text-foreground italic leading-relaxed">
+                                      {(order as Order & { observacoes?: string | null }).observacoes}
+                                    </span>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </div>
@@ -1280,20 +1526,27 @@ function PDVTab({ isActive }: { isActive: boolean }) {
   const [custCPF,         setCustCPF]         = useState("");
   const [vendedor,        setVendedor]        = useState("");
   const [payMethod,       setPayMethod]       = useState<"dinheiro" | "cartao" | "pix">("dinheiro");
-  const [discountPct,     setDiscountPct]     = useState(0);
+  const [discountPct,     setDiscountPct]     = useState("");
   const [submitting,      setSubmitting]      = useState(false);
   const [successNum,      setSuccessNum]      = useState<string | null>(null);
+  const [valorRecebido,   setValorRecebido]   = useState<string>("");
+  const [lastReceipt,     setLastReceipt]     = useState<ReceiptData | null>(null);
+  const [parcelas,        setParcelas]        = useState(1);
+  const [observacoes,     setObservacoes]     = useState("");
+  const [cfgCartao,       setCfgCartao]       = useState<ConfigCartao>({ taxa_pct: 2.5, parcelas_max: 6, juros_a_partir_de: 2 });
   const loaded = useRef(false);
 
   const loadProducts = useCallback(async () => {
     setLoadingProducts(true);
     try {
-      const [prodData, colabData] = await Promise.all([
+      const [prodData, colabData, appCfg] = await Promise.all([
         fetchAllProducts(),
         fetchColaboradores(),
+        fetchConfig(),
       ]);
       setAllProducts(prodData.filter(p => p.isActive));
       setColaboradores(colabData.filter(c => c.ativo));
+      setCfgCartao(appCfg.cartao);
       loaded.current = true;
     } catch { toast.error("Erro ao carregar produtos"); }
     finally { setLoadingProducts(false); }
@@ -1309,29 +1562,66 @@ function PDVTab({ isActive }: { isActive: boolean }) {
   );
 
   function addToCart(product: AdminProduct) {
+    const stockDisp = product.stock ?? 0;
+    if (stockDisp === 0) { toast.warning("Produto sem estoque."); return; }
     setCart(prev => {
       const found = prev.find(i => i.product.id === product.id);
-      if (found) return prev.map(i => i.product.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+      if (found) {
+        if (found.qty >= stockDisp) {
+          toast.warning(`Estoque maximo atingido (${stockDisp} un.)`);
+          return prev;
+        }
+        return prev.map(i => i.product.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+      }
       return [...prev, { product, qty: 1 }];
     });
   }
 
   function updateQty(productId: string, delta: number) {
-    setCart(prev =>
-      prev.map(i => i.product.id === productId ? { ...i, qty: Math.max(0, i.qty + delta) } : i)
-        .filter(i => i.qty > 0),
-    );
+    setCart(prev => {
+      if (delta > 0) {
+        const item = prev.find(i => i.product.id === productId);
+        if (item && item.qty >= (item.product.stock ?? 0)) {
+          toast.warning(`Estoque maximo atingido (${item.product.stock ?? 0} un.)`);
+          return prev;
+        }
+      }
+      return prev
+        .map(i => i.product.id === productId ? { ...i, qty: Math.max(0, i.qty + delta) } : i)
+        .filter(i => i.qty > 0);
+    });
   }
 
   const subtotal = cart.reduce((s, i) => s + i.product.price * i.qty, 0);
-  const discount = subtotal * (discountPct / 100);
+  const discountNum = Math.min(100, Math.max(0, Number(discountPct) || 0));
+  const discount = subtotal * (discountNum / 100);
   const total    = subtotal - discount;
+  const troco    = payMethod === "dinheiro" && valorRecebido
+    ? Math.max(0, Number(valorRecebido) - total)
+    : 0;
+
+  // Parcelas com taxa
+  const parcelaOpts = calcularParcelas(total, cfgCartao);
+  const parcelaSel  = parcelaOpts.find(p => p.parcelas === parcelas) ?? parcelaOpts[0];
+  const totalCartao = payMethod === "cartao" && parcelaSel ? parcelaSel.totalFinal : total;
 
   async function handleSale() {
     if (cart.length === 0) { toast.error("Adicione pelo menos um produto."); return; }
     if (!custName.trim()) { toast.error("Informe o nome do cliente."); return; }
     setSubmitting(true);
     setSuccessNum(null);
+    setLastReceipt(null);
+    const saleItems = cart.map(i => ({
+      product_id:       i.product.id,
+      product_name:     i.product.name,
+      product_image:    i.product.image,
+      product_brand:    i.product.brand,
+      product_quantity: i.product.quantity,
+      unit_price:       i.product.price,
+      quantity:         i.qty,
+      total:            i.product.price * i.qty,
+    }));
+    const payMap = { dinheiro: "credit" as const, cartao: "credit" as const, pix: "pix" as const };
     try {
       const result = await createOrder({
         customer_name:        custName.trim(),
@@ -1343,29 +1633,41 @@ function PDVTab({ isActive }: { isActive: boolean }) {
         shipping_number:      "S/N",
         shipping_city:        "Alagoinhas",
         shipping_state:       "BA",
-        payment_method:       payMethod === "pix" ? "pix" : "credit",
-        payment_installments: 1,
+        payment_method:       payMap[payMethod],
+        payment_installments: payMethod === "cartao" ? parcelas : 1,
         subtotal,
         discount,
         shipping_cost:        0,
-        total,
+        total:                totalCartao,
         vendedor_nome:        vendedor || null,
-        items: cart.map(i => ({
-          product_id:       i.product.id,
-          product_name:     i.product.name,
-          product_image:    i.product.image,
-          product_brand:    i.product.brand,
-          product_quantity: i.product.quantity,
-          unit_price:       i.product.price,
-          quantity:         i.qty,
-          total:            i.product.price * i.qty,
-        })),
+        observacoes:          observacoes.trim() || null,
+        items: saleItems,
       });
       if (result.order) {
         await updateOrderStatus(result.order.id, "delivered");
         setSuccessNum(result.order.order_number);
+        setLastReceipt({
+          orderNumber:    result.order.order_number,
+          customerName:   custName.trim(),
+          vendedor:       vendedor || null,
+          paymentMethod:  payMethod,
+          parcelas:       payMethod === "cartao" ? parcelas : undefined,
+          items: cart.map(i => ({
+            name:      i.product.name,
+            qty:       i.qty,
+            unitPrice: i.product.price,
+            total:     i.product.price * i.qty,
+          })),
+          subtotal,
+          discount,
+          total:         totalCartao,
+          troco:         payMethod === "dinheiro" && valorRecebido ? troco : null,
+          valorRecebido: payMethod === "dinheiro" && valorRecebido ? Number(valorRecebido) : null,
+          date:          new Date(),
+        });
         setCart([]);
-        setCustName(""); setCustPhone(""); setCustCPF(""); setDiscountPct(0); setVendedor("");
+        setCustName(""); setCustPhone(""); setCustCPF(""); setDiscountPct(0);
+        setVendedor(""); setValorRecebido(""); setParcelas(1); setObservacoes("");
         toast.success(`Venda ${result.order.order_number} registrada!`);
       } else {
         toast.error(result.error ?? "Erro ao registrar venda");
@@ -1376,15 +1678,16 @@ function PDVTab({ isActive }: { isActive: boolean }) {
   }
 
   return (
-    <div className="grid lg:grid-cols-5 gap-6">
+    <div className="grid lg:grid-cols-5 gap-6 h-[calc(100vh-160px)] min-h-[480px]">
       {/* ── Lista de produtos ── */}
-      <div className="lg:col-span-3 space-y-3">
-        <div className="relative">
+      <div className="lg:col-span-3 flex flex-col min-h-0 gap-3">
+        <div className="relative shrink-0">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Buscar produto por nome ou marca..." className="pl-9" />
         </div>
 
+        <div className="flex-1 min-h-0 overflow-y-auto pr-1">
         {loadingProducts ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -1392,17 +1695,31 @@ function PDVTab({ isActive }: { isActive: boolean }) {
             ))}
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-[500px] overflow-y-auto pr-1">
-            {filtered.map(p => (
-              <button key={p.id} onClick={() => addToCart(p)}
-                className="bg-background border border-border hover:border-primary rounded-xl p-3 text-left transition-colors group">
-                <img src={p.image || "/placeholder.svg"} alt={p.name}
-                  className="w-full h-16 object-contain mb-2 rounded-lg bg-secondary"
-                  onError={e => { (e.target as HTMLImageElement).src = "/placeholder.svg"; }} />
-                <p className="text-xs font-semibold line-clamp-2 group-hover:text-primary leading-snug">{p.name}</p>
-                <p className="text-xs text-primary font-bold mt-1">{fmt(p.price)}</p>
-              </button>
-            ))}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {filtered.map(p => {
+              const sem = (p.stock ?? 0) === 0;
+              const baixo = !sem && (p.stock ?? 0) <= 5;
+              return (
+                <button key={p.id} onClick={() => addToCart(p)} disabled={sem}
+                  className={`relative bg-background border rounded-xl p-3 text-left transition-colors group ${
+                    sem
+                      ? "border-border opacity-50 cursor-not-allowed"
+                      : "border-border hover:border-primary"
+                  }`}>
+                  {sem && (
+                    <span className="absolute top-1.5 right-1.5 text-[9px] font-bold bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full">Esgotado</span>
+                  )}
+                  {baixo && (
+                    <span className="absolute top-1.5 right-1.5 text-[9px] font-bold bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">Ult. {p.stock}</span>
+                  )}
+                  <img src={p.image || "/placeholder.svg"} alt={p.name}
+                    className="w-full h-16 object-contain mb-2 rounded-lg bg-secondary"
+                    onError={e => { (e.target as HTMLImageElement).src = "/placeholder.svg"; }} />
+                  <p className="text-xs font-semibold line-clamp-2 group-hover:text-primary leading-snug">{p.name}</p>
+                  <p className="text-xs text-primary font-bold mt-1">{fmt(p.price)}</p>
+                </button>
+              );
+            })}
             {filtered.length === 0 && (
               <div className="col-span-3 py-10 text-center text-sm text-muted-foreground">
                 {search ? `Nenhum produto para "${search}"` : "Nenhum produto ativo cadastrado"}
@@ -1410,10 +1727,11 @@ function PDVTab({ isActive }: { isActive: boolean }) {
             )}
           </div>
         )}
+        </div>{/* fim scroll container */}
       </div>
 
       {/* ── Carrinho + Cliente + Pagamento ── */}
-      <div className="lg:col-span-2 space-y-4">
+      <div className="lg:col-span-2 space-y-4 overflow-y-auto pr-0.5">
 
         {/* Carrinho */}
         <div className="bg-background border border-border rounded-xl overflow-hidden">
@@ -1438,7 +1756,14 @@ function PDVTab({ isActive }: { isActive: boolean }) {
                 <div key={item.product.id} className="flex items-center gap-2 px-4 py-2.5">
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-medium line-clamp-1">{item.product.name}</p>
-                    <p className="text-[11px] text-muted-foreground">{fmt(item.product.price)} × {item.qty}</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {fmt(item.product.price)} × {item.qty}
+                      {item.product.stock !== null && (
+                        <span className={`ml-1.5 ${item.qty >= (item.product.stock ?? 0) ? "text-amber-600 font-medium" : "text-muted-foreground"}`}>
+                          (est. {item.product.stock})
+                        </span>
+                      )}
+                    </p>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
                     <button onClick={() => updateQty(item.product.id, -1)}
@@ -1499,6 +1824,18 @@ function PDVTab({ isActive }: { isActive: boolean }) {
               <Input value={custCPF} onChange={e => setCustCPF(e.target.value)}
                 placeholder="Opcional" className="mt-1" />
             </div>
+            <div className="col-span-2">
+              <Label className="text-xs flex items-center gap-1">
+                <MessageSquare className="h-3 w-3" /> Observações
+              </Label>
+              <Textarea
+                value={observacoes}
+                onChange={e => setObservacoes(e.target.value)}
+                placeholder="Anotações internas sobre o pedido (opcional)..."
+                className="mt-1 resize-none text-xs"
+                rows={2}
+              />
+            </div>
           </div>
         </div>
 
@@ -1525,29 +1862,102 @@ function PDVTab({ isActive }: { isActive: boolean }) {
 
           <div className="flex items-center gap-2">
             <Label className="text-xs whitespace-nowrap">Desconto (%)</Label>
-            <Input type="number" min={0} max={100} value={discountPct}
-              onChange={e => setDiscountPct(Math.min(100, Math.max(0, Number(e.target.value))))}
+            <Input
+              type="number" min={0} max={100}
+              value={discountPct}
+              placeholder="0"
+              onChange={e => {
+                const raw = e.target.value;
+                if (raw === "") { setDiscountPct(""); return; }
+                const clamped = Math.min(100, Math.max(0, Number(raw)));
+                setDiscountPct(String(clamped));
+              }}
               className="w-20 text-right" />
           </div>
+
+          {/* Parcelas — só aparece para cartão */}
+          {payMethod === "cartao" && cart.length > 0 && (
+            <div className="space-y-2">
+              <Label className="text-xs">Parcelas</Label>
+              <div className="grid grid-cols-2 gap-1.5">
+                {parcelaOpts.map(p => (
+                  <button
+                    key={p.parcelas}
+                    onClick={() => setParcelas(p.parcelas)}
+                    className={`text-left text-[11px] px-2.5 py-2 rounded-lg border-2 transition-colors leading-tight ${
+                      parcelas === p.parcelas
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border hover:border-primary/40 text-muted-foreground"
+                    }`}
+                  >
+                    <span className="font-bold">{p.parcelas}x</span>{" "}
+                    {fmt(p.valorParcela)}
+                    {p.temJuros
+                      ? <span className="text-amber-600 ml-1">(+juros)</span>
+                      : <span className="text-green-600 ml-1">s/ juros</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Troco — só aparece para dinheiro */}
+          {payMethod === "dinheiro" && cart.length > 0 && (
+            <div className="flex items-center gap-2">
+              <Label className="text-xs whitespace-nowrap">Valor recebido</Label>
+              <Input type="number" min={0} step="0.01" value={valorRecebido}
+                onChange={e => setValorRecebido(e.target.value)}
+                placeholder="0,00" className="w-28 text-right" />
+            </div>
+          )}
 
           <div className="space-y-1 text-sm border-t border-border pt-3">
             <div className="flex justify-between text-muted-foreground">
               <span>Subtotal</span><span>{fmt(subtotal)}</span>
             </div>
-            {discountPct > 0 && (
+            {discountNum > 0 && (
               <div className="flex justify-between text-green-600">
-                <span>Desconto ({discountPct}%)</span><span>-{fmt(discount)}</span>
+                <span>Desconto ({discountNum}%)</span><span>-{fmt(discount)}</span>
+              </div>
+            )}
+            {payMethod === "cartao" && parcelaSel?.temJuros && (
+              <div className="flex justify-between text-amber-600 text-xs">
+                <span>Taxa cartão ({parcelas}x)</span>
+                <span>+{fmt(parcelaSel.totalFinal - total)}</span>
               </div>
             )}
             <div className="flex justify-between font-bold text-base pt-1 border-t border-border">
-              <span>Total</span><span>{fmt(total)}</span>
+              <span>Total</span>
+              <span>{fmt(payMethod === "cartao" ? totalCartao : total)}</span>
             </div>
+            {payMethod === "cartao" && parcelas > 1 && (
+              <div className="flex justify-between text-xs text-muted-foreground">
+                <span>{parcelas}x de</span>
+                <span className="font-medium">{fmt((payMethod === "cartao" ? totalCartao : total) / parcelas)}</span>
+              </div>
+            )}
+            {payMethod === "dinheiro" && Number(valorRecebido) > 0 && (
+              <div className={`flex justify-between font-semibold pt-1 ${
+                Number(valorRecebido) >= total ? "text-green-600" : "text-red-500"
+              }`}>
+                <span>Troco</span><span>{fmt(troco)}</span>
+              </div>
+            )}
           </div>
 
           {successNum && (
-            <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2 flex items-center gap-2 text-sm text-green-700">
-              <CheckCircle2 className="h-4 w-4 shrink-0" />
-              Venda <strong>{successNum}</strong> registrada com sucesso!
+            <div className="bg-green-50 border border-green-200 rounded-lg p-3 space-y-2">
+              <div className="flex items-center gap-2 text-sm text-green-700">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                Venda <strong>{successNum}</strong> registrada com sucesso!
+              </div>
+              {lastReceipt && (
+                <Button variant="outline" size="sm" className="w-full gap-1.5 text-xs"
+                  onClick={() => gerarRecibo(lastReceipt)}>
+                  <FileDown className="h-3.5 w-3.5" />
+                  Imprimir recibo
+                </Button>
+              )}
             </div>
           )}
 
@@ -1884,7 +2294,7 @@ function FluxoCaixaTab({ isActive }: { isActive: boolean }) {
 }
 
 // ─── Colaboradores ────────────────────────────────────────────────────────────
-function ColaboradoresTab({ isActive }: { isActive: boolean }) {
+function ColaboradoresTab({ isActive, isAdmin = true }: { isActive: boolean; isAdmin?: boolean }) {
   const [colaboradores, setColaboradores] = useState<Colaborador[]>([]);
   const [loading,       setLoading]       = useState(false);
   const [search,        setSearch]        = useState("");
@@ -1905,11 +2315,35 @@ function ColaboradoresTab({ isActive }: { isActive: boolean }) {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  // ── Acesso ao sistema ──────────────────────────────────────────────────────
+  const [acessoMap,     setAcessoMap]     = useState<Record<string, UserRole>>({});
+  const [acessoDialog,  setAcessoDialog]  = useState(false);
+  const [colabSel,      setColabSel]      = useState<Colaborador | null>(null);
+  const [acessoAtual,   setAcessoAtual]   = useState<UserRole | null | "loading">("loading");
+  const [acessoEmail,   setAcessoEmail]   = useState("");
+  const [acessoSenha,   setAcessoSenha]   = useState("");
+  const [showSenha,     setShowSenha]     = useState(false);
+  const [acessoPerms,   setAcessoPerms]   = useState<string[]>([]);
+  const [acessoSaving,  setAcessoSaving]  = useState(false);
+  const [novaSenha,     setNovaSenha]     = useState("");
+  const [showNovaSenha, setShowNovaSenha] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setColaboradores(await fetchColaboradores());
+      const colabs = await fetchColaboradores();
+      setColaboradores(colabs);
       loaded.current = true;
+      // Carregar mapa de acessos (quais colaboradores têm login)
+      if (colabs.length > 0) {
+        const { data } = await supabase
+          .from("user_roles")
+          .select("*")
+          .in("colaborador_id", colabs.map(c => c.id));
+        const map: Record<string, UserRole> = {};
+        (data ?? []).forEach((r: UserRole) => { if (r.colaborador_id) map[r.colaborador_id] = r; });
+        setAcessoMap(map);
+      }
     } catch { toast.error("Erro ao carregar colaboradores"); }
     finally { setLoading(false); }
   }, []);
@@ -1991,8 +2425,255 @@ function ColaboradoresTab({ isActive }: { isActive: boolean }) {
     finally { setDeleting(false); setDeleteId(null); }
   }
 
+  // ── Gerenciamento de acesso ──────────────────────────────────────────────
+  async function openAcessoDialog(c: Colaborador) {
+    setColabSel(c);
+    setAcessoEmail(c.email || "");
+    setAcessoSenha(""); setNovaSenha("");
+    setShowSenha(false); setShowNovaSenha(false);
+    setAcessoAtual("loading");
+    setAcessoDialog(true);
+    try {
+      const acesso = await fetchColaboradorAcesso(c.id);
+      setAcessoAtual(acesso);
+      setAcessoPerms(acesso?.permissoes ?? []);
+    } catch { setAcessoAtual(null); setAcessoPerms([]); }
+  }
+
+  async function handleCriarAcesso() {
+    if (!colabSel || !acessoEmail.trim() || acessoSenha.length < 6) {
+      toast.error("Informe e-mail e senha (mín. 6 caracteres).");
+      return;
+    }
+    setAcessoSaving(true);
+    try {
+      await createColaboradorUser({
+        email: acessoEmail.trim(),
+        password: acessoSenha,
+        colaborador_id: colabSel.id,
+        permissoes: acessoPerms,
+      });
+      const acesso = await fetchColaboradorAcesso(colabSel.id);
+      setAcessoAtual(acesso);
+      setAcessoMap(prev => acesso ? { ...prev, [colabSel.id]: acesso } : prev);
+      setAcessoSenha("");
+      toast.success("Acesso criado! Compartilhe o e-mail e a senha com o colaborador.");
+    } catch (err) { toast.error(err instanceof Error ? err.message : "Erro ao criar acesso"); }
+    finally { setAcessoSaving(false); }
+  }
+
+  async function handleSalvarPermissoes() {
+    if (!acessoAtual || acessoAtual === "loading") return;
+    setAcessoSaving(true);
+    try {
+      await updatePermissoes(acessoAtual.user_id, acessoPerms);
+      const updated = { ...acessoAtual, permissoes: acessoPerms };
+      setAcessoAtual(updated);
+      setAcessoMap(prev => colabSel ? { ...prev, [colabSel.id]: updated } : prev);
+      toast.success("Permissões atualizadas!");
+    } catch { toast.error("Erro ao salvar permissões"); }
+    finally { setAcessoSaving(false); }
+  }
+
+  async function handleAlterarSenha() {
+    if (!acessoAtual || acessoAtual === "loading" || novaSenha.length < 6) {
+      toast.error("Senha deve ter pelo menos 6 caracteres."); return;
+    }
+    setAcessoSaving(true);
+    try {
+      await updatePassword(acessoAtual.user_id, novaSenha);
+      setNovaSenha("");
+      toast.success("Senha alterada com sucesso!");
+    } catch { toast.error("Erro ao alterar senha"); }
+    finally { setAcessoSaving(false); }
+  }
+
+  async function handleToggleAcesso() {
+    if (!acessoAtual || acessoAtual === "loading") return;
+    setAcessoSaving(true);
+    try {
+      const novoAtivo = !acessoAtual.ativo;
+      await toggleAcesso(acessoAtual.user_id, novoAtivo);
+      const updated = { ...acessoAtual, ativo: novoAtivo };
+      setAcessoAtual(updated);
+      setAcessoMap(prev => colabSel ? { ...prev, [colabSel.id]: updated } : prev);
+      toast.success(novoAtivo ? "Acesso reativado!" : "Acesso revogado!");
+    } catch { toast.error("Erro ao alterar acesso"); }
+    finally { setAcessoSaving(false); }
+  }
+
+  async function handleDeletarAcesso() {
+    if (!acessoAtual || acessoAtual === "loading") return;
+    setAcessoSaving(true);
+    try {
+      await deleteColaboradorUser(acessoAtual.user_id);
+      setAcessoAtual(null);
+      setAcessoPerms([]);
+      setAcessoMap(prev => {
+        const next = { ...prev };
+        if (colabSel) delete next[colabSel.id];
+        return next;
+      });
+      toast.success("Conta de acesso removida.");
+    } catch { toast.error("Erro ao remover conta"); }
+    finally { setAcessoSaving(false); }
+  }
+
   return (
     <>
+      {/* ── Dialog: Acesso ao Sistema ───────────────────────────────────── */}
+      <Dialog open={acessoDialog} onOpenChange={v => { if (!acessoSaving) setAcessoDialog(v); }}>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="h-4 w-4 text-primary" />
+              Acesso — {colabSel?.nome}
+            </DialogTitle>
+          </DialogHeader>
+
+          {acessoAtual === "loading" ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              <RefreshCw className="h-4 w-4 animate-spin mx-auto mb-2" />Carregando...
+            </div>
+          ) : acessoAtual === null ? (
+            /* ── Criar novo acesso ─────────────────────────────────────── */
+            <div className="space-y-4 pt-1">
+              <div className="bg-secondary rounded-lg p-3 flex items-center gap-2">
+                <ShieldOff className="h-4 w-4 text-muted-foreground shrink-0" />
+                <p className="text-sm text-muted-foreground">Colaborador sem acesso ao sistema.</p>
+              </div>
+
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">E-mail de login *</Label>
+                  <Input value={acessoEmail} onChange={e => setAcessoEmail(e.target.value)}
+                    placeholder="colaborador@email.com" type="email" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Senha *</Label>
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Input value={acessoSenha} onChange={e => setAcessoSenha(e.target.value)}
+                        type={showSenha ? "text" : "password"} placeholder="Mín. 6 caracteres" className="pr-9" />
+                      <button type="button" onClick={() => setShowSenha(v => !v)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                        {showSenha ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                    <Button type="button" variant="outline" size="sm" className="shrink-0"
+                      onClick={() => { const s = gerarSenhaAleatoria(); setAcessoSenha(s); setShowSenha(true); }}>
+                      Gerar
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Abas permitidas</p>
+                <div className="space-y-1.5">
+                  {ABAS_COLABORADOR.map(aba => (
+                    <label key={aba.id} className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-secondary cursor-pointer">
+                      <input type="checkbox" className="rounded"
+                        checked={acessoPerms.includes(aba.id)}
+                        onChange={e => setAcessoPerms(prev =>
+                          e.target.checked ? [...prev, aba.id] : prev.filter(x => x !== aba.id)
+                        )}
+                      />
+                      <span className="text-sm flex-1">{aba.label}</span>
+                      <span className="text-[10px] text-muted-foreground bg-secondary px-1.5 py-0.5 rounded">{aba.grupo}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <Button className="w-full gap-2" onClick={handleCriarAcesso} disabled={acessoSaving}>
+                {acessoSaving ? <><RefreshCw className="h-4 w-4 animate-spin" />Criando...</>
+                  : <><ShieldCheck className="h-4 w-4" />Criar acesso</>}
+              </Button>
+            </div>
+          ) : (
+            /* ── Gerenciar acesso existente ────────────────────────────── */
+            <div className="space-y-5 pt-1">
+              {/* Status badge */}
+              <div className={`flex items-center gap-2 rounded-lg p-3 ${
+                acessoAtual.ativo ? "bg-green-50 border border-green-200" : "bg-red-50 border border-red-200"
+              }`}>
+                {acessoAtual.ativo
+                  ? <ShieldCheck className="h-4 w-4 text-green-600 shrink-0" />
+                  : <ShieldAlert className="h-4 w-4 text-red-600 shrink-0" />}
+                <div>
+                  <p className={`text-sm font-semibold ${acessoAtual.ativo ? "text-green-700" : "text-red-700"}`}>
+                    {acessoAtual.ativo ? "Acesso ativo" : "Acesso revogado"}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Login: {colabSel?.email || "e-mail cadastrado no colaborador"}
+                  </p>
+                </div>
+              </div>
+
+              {/* Alterar senha */}
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Alterar senha</p>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Input value={novaSenha} onChange={e => setNovaSenha(e.target.value)}
+                      type={showNovaSenha ? "text" : "password"} placeholder="Nova senha (mín. 6 car.)" className="pr-9" />
+                    <button type="button" onClick={() => setShowNovaSenha(v => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                      {showNovaSenha ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" className="shrink-0"
+                    onClick={() => { const s = gerarSenhaAleatoria(); setNovaSenha(s); setShowNovaSenha(true); }}>
+                    Gerar
+                  </Button>
+                </div>
+                <Button variant="outline" size="sm" className="gap-1.5 w-full"
+                  onClick={handleAlterarSenha} disabled={acessoSaving || !novaSenha}>
+                  <KeyRound className="h-3.5 w-3.5" /> Atualizar senha
+                </Button>
+              </div>
+
+              {/* Permissões */}
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Abas permitidas</p>
+                <div className="space-y-1.5">
+                  {ABAS_COLABORADOR.map(aba => (
+                    <label key={aba.id} className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-secondary cursor-pointer">
+                      <input type="checkbox" className="rounded"
+                        checked={acessoPerms.includes(aba.id)}
+                        onChange={e => setAcessoPerms(prev =>
+                          e.target.checked ? [...prev, aba.id] : prev.filter(x => x !== aba.id)
+                        )}
+                      />
+                      <span className="text-sm flex-1">{aba.label}</span>
+                      <span className="text-[10px] text-muted-foreground bg-secondary px-1.5 py-0.5 rounded">{aba.grupo}</span>
+                    </label>
+                  ))}
+                </div>
+                <Button size="sm" className="gap-1.5 w-full" onClick={handleSalvarPermissoes} disabled={acessoSaving}>
+                  <ShieldCheck className="h-3.5 w-3.5" /> Salvar permissões
+                </Button>
+              </div>
+
+              {/* Revogar / Remover */}
+              <div className="border-t border-border pt-4 flex gap-2">
+                <Button variant="outline" size="sm" className={`flex-1 gap-1.5 ${acessoAtual.ativo ? "text-amber-700 border-amber-300 hover:bg-amber-50" : "text-green-700 border-green-300 hover:bg-green-50"}`}
+                  onClick={handleToggleAcesso} disabled={acessoSaving}>
+                  {acessoAtual.ativo
+                    ? <><ShieldOff className="h-3.5 w-3.5" />Revogar acesso</>
+                    : <><ShieldCheck className="h-3.5 w-3.5" />Reativar acesso</>}
+                </Button>
+                <Button variant="outline" size="sm" className="gap-1.5 text-destructive border-destructive/30 hover:bg-destructive/5"
+                  onClick={handleDeletarAcesso} disabled={acessoSaving}>
+                  <Trash2 className="h-3.5 w-3.5" /> Remover conta
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* Modal criar/editar */}
       <Dialog open={modalOpen} onOpenChange={v => setModalOpen(v)}>
         <DialogContent className="max-w-lg">
@@ -2157,7 +2838,18 @@ function ColaboradoresTab({ isActive }: { isActive: boolean }) {
                         {c.nome.charAt(0).toUpperCase()}
                       </div>
                       <div>
-                        <p className="font-medium text-sm">{c.nome}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="font-medium text-sm">{c.nome}</p>
+                          {acessoMap[c.id] && (
+                            <span className={`inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                              acessoMap[c.id].ativo ? "bg-green-100 text-green-700" : "bg-red-100 text-red-600"
+                            }`}>
+                              {acessoMap[c.id].ativo
+                                ? <><ShieldCheck className="h-2.5 w-2.5" />Login</>
+                                : <><ShieldAlert className="h-2.5 w-2.5" />Revogado</>}
+                            </span>
+                          )}
+                        </div>
                         {c.email && <p className="text-xs text-muted-foreground">{c.email}</p>}
                       </div>
                     </div>
@@ -2180,6 +2872,13 @@ function ColaboradoresTab({ isActive }: { isActive: boolean }) {
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1 justify-end">
+                      {isAdmin && (
+                        <button onClick={() => openAcessoDialog(c)}
+                          title="Gerenciar acesso ao sistema"
+                          className="text-muted-foreground hover:text-primary transition-colors p-1">
+                          <KeyRound className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                       <button onClick={() => openEdit(c)}
                         className="text-muted-foreground hover:text-foreground transition-colors p-1">
                         <Pencil className="h-3.5 w-3.5" />
@@ -2432,39 +3131,46 @@ function ClientesTab({ isActive }: { isActive: boolean }) {
 }
 
 // ─── Aba Estoque ─────────────────────────────────────────────────────────────
-function EstoqueTab({ isActive }: { isActive: boolean }) {
-  const [produtos, setProdutos] = useState<EstoqueProduto[]>([]);
-  const [loading, setLoading]   = useState(false);
-  const loaded = useRef(false);
-  const [search, setSearch]     = useState("");
-  const [filtro, setFiltro]     = useState<"todos" | "baixo" | "zero">("todos");
+function EstoqueTab({ isActive, isAdmin = true }: { isActive: boolean; isAdmin?: boolean }) {
+  const [produtos, setProdutos]   = useState<EstoqueProduto[]>([]);
+  const [fornecedores, setFornecedores] = useState<Fornecedor[]>([]);
+  const [loading, setLoading]     = useState(false);
+  const [search, setSearch]       = useState("");
+  const [filtro, setFiltro]       = useState<"todos" | "baixo" | "zero" | "vencendo">("todos");
 
-  const [ajusteOpen,   setAjusteOpen]   = useState(false);
-  const [produtoSel,   setProdutoSel]   = useState<EstoqueProduto | null>(null);
-  const [tipoAjuste,   setTipoAjuste]   = useState<"entrada" | "saida" | "inventario">("entrada");
-  const [qtdAjuste,    setQtdAjuste]    = useState("");
-  const [stockMinEdit, setStockMinEdit] = useState("");
-  const [saving,       setSaving]       = useState(false);
+  const [ajusteOpen,     setAjusteOpen]     = useState(false);
+  const [produtoSel,     setProdutoSel]     = useState<EstoqueProduto | null>(null);
+  const [tipoAjuste,     setTipoAjuste]     = useState<"entrada" | "saida" | "inventario">("entrada");
+  const [qtdAjuste,      setQtdAjuste]      = useState("");
+  const [stockMinEdit,   setStockMinEdit]   = useState("");
+  const [loteEdit,       setLoteEdit]       = useState("");
+  const [validadeEdit,   setValidadeEdit]   = useState("");
+  const [fornecedorEdit, setFornecedorEdit] = useState("");
+  const [saving,         setSaving]         = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchEstoque();
+      const [data, forn] = await Promise.all([fetchEstoque(), fetchFornecedores()]);
       setProdutos(data);
-      loaded.current = true;
+      setFornecedores(forn.filter(f => f.is_active));
     } catch { toast.error("Erro ao carregar estoque"); }
     finally { setLoading(false); }
   }, []);
 
+  // Recarrega sempre que a aba fica ativa para refletir vendas recentes
   useEffect(() => {
-    if (isActive && !loaded.current) load();
+    if (isActive) load();
   }, [isActive, load]);
 
   function openAjuste(p: EstoqueProduto) {
     setProdutoSel(p);
     setTipoAjuste("entrada");
     setQtdAjuste("");
-    setStockMinEdit(String(p.stock_min));
+    setStockMinEdit(String(p.stock_min ?? 5));
+    setLoteEdit(p.lote ?? "");
+    setValidadeEdit(p.validade ?? "");
+    setFornecedorEdit(p.fornecedor_id ?? "");
     setAjusteOpen(true);
   }
 
@@ -2483,12 +3189,19 @@ function EstoqueTab({ isActive }: { isActive: boolean }) {
       if      (tipoAjuste === "entrada")    novoStock = novoStock + qty;
       else if (tipoAjuste === "saida")      novoStock = Math.max(0, novoStock - qty);
       else                                  novoStock = qty;
-      const novoMin = Number(stockMinEdit);
+      const novoMin  = Number(stockMinEdit);
       const minFinal = isNaN(novoMin) ? produtoSel.stock_min : novoMin;
-      await ajustarEstoque(produtoSel.id, novoStock, minFinal);
+      await ajustarEstoque(produtoSel.id, novoStock, {
+        stockMin:      minFinal,
+        lote:          loteEdit,
+        validade:      validadeEdit || null,
+        fornecedor_id: fornecedorEdit || null,
+      });
       setProdutos(prev =>
         prev.map(p => p.id === produtoSel.id
-          ? { ...p, stock: novoStock, stock_min: minFinal }
+          ? { ...p, stock: novoStock, stock_min: minFinal,
+              lote: loteEdit || null, validade: validadeEdit || null,
+              fornecedor_id: fornecedorEdit || null }
           : p
         )
       );
@@ -2498,10 +3211,14 @@ function EstoqueTab({ isActive }: { isActive: boolean }) {
     finally { setSaving(false); }
   }
 
+  const vencendo30 = produtosVencendoEm(produtos, 30);
+  const vencidos   = produtosVencendoEm(produtos, 0);
+
   const filtered = produtos
     .filter(p => {
-      if (filtro === "zero")  return p.stock === 0;
-      if (filtro === "baixo") return p.stock > 0 && p.stock <= p.stock_min;
+      if (filtro === "zero")     return p.stock === 0;
+      if (filtro === "baixo")    return p.stock > 0 && p.stock <= p.stock_min;
+      if (filtro === "vencendo") return vencendo30.some(v => v.id === p.id);
       return true;
     })
     .filter(p =>
@@ -2514,6 +3231,17 @@ function EstoqueTab({ isActive }: { isActive: boolean }) {
   const semEstoque   = produtos.filter(p => p.stock === 0).length;
   const baixoEstoque = produtos.filter(p => p.stock > 0 && p.stock <= p.stock_min).length;
 
+  function fmtValidade(iso: string | null): string {
+    if (!iso) return "—";
+    const [y, m, d] = iso.split("-");
+    return `${d}/${m}/${y}`;
+  }
+
+  function isVencido(iso: string | null): boolean {
+    if (!iso) return false;
+    return new Date(iso + "T00:00:00") < new Date(new Date().toDateString());
+  }
+
   function StockBadge({ p }: { p: EstoqueProduto }) {
     if (p.stock === 0)
       return <span className="inline-flex text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700">Sem estoque</span>;
@@ -2524,15 +3252,15 @@ function EstoqueTab({ isActive }: { isActive: boolean }) {
 
   return (
     <div className="space-y-4">
-      {/* Alertas de estoque */}
-      {(semEstoque > 0 || baixoEstoque > 0) && (
-        <div className="grid sm:grid-cols-2 gap-3">
+      {/* Alertas */}
+      {(semEstoque > 0 || baixoEstoque > 0 || vencendo30.length > 0) && (
+        <div className="grid sm:grid-cols-3 gap-3">
           {semEstoque > 0 && (
             <div className="flex items-center gap-3 bg-red-50 border border-red-200 rounded-xl p-3.5">
               <AlertCircle className="h-5 w-5 text-red-600 shrink-0" />
               <div>
-                <p className="text-sm font-semibold text-red-700">{semEstoque} produto{semEstoque > 1 ? "s" : ""} sem estoque</p>
-                <p className="text-xs text-red-600">Requer reposição imediata</p>
+                <p className="text-sm font-semibold text-red-700">{semEstoque} sem estoque</p>
+                <p className="text-xs text-red-600">Reposição imediata</p>
               </div>
             </div>
           )}
@@ -2540,8 +3268,19 @@ function EstoqueTab({ isActive }: { isActive: boolean }) {
             <div className="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3.5">
               <AlertCircle className="h-5 w-5 text-amber-600 shrink-0" />
               <div>
-                <p className="text-sm font-semibold text-amber-700">{baixoEstoque} produto{baixoEstoque > 1 ? "s" : ""} com estoque baixo</p>
-                <p className="text-xs text-amber-600">Abaixo do mínimo definido</p>
+                <p className="text-sm font-semibold text-amber-700">{baixoEstoque} estoque baixo</p>
+                <p className="text-xs text-amber-600">Abaixo do mínimo</p>
+              </div>
+            </div>
+          )}
+          {vencendo30.length > 0 && (
+            <div className="flex items-center gap-3 bg-purple-50 border border-purple-200 rounded-xl p-3.5">
+              <CalendarCheck className="h-5 w-5 text-purple-600 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-purple-700">
+                  {vencidos.length > 0 ? `${vencidos.length} vencido(s)` : `${vencendo30.length} vencem em 30 dias`}
+                </p>
+                <p className="text-xs text-purple-600">Verificar validade</p>
               </div>
             </div>
           )}
@@ -2554,19 +3293,19 @@ function EstoqueTab({ isActive }: { isActive: boolean }) {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar produto..." className="pl-9" />
         </div>
-        <div className="flex gap-1.5">
-          {(["todos", "baixo", "zero"] as const).map(f => (
+        <div className="flex gap-1.5 flex-wrap">
+          {(["todos", "baixo", "zero", "vencendo"] as const).map(f => (
             <button key={f} onClick={() => setFiltro(f)}
               className={`px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
                 filtro === f
                   ? "bg-primary text-primary-foreground"
                   : "bg-background border border-border text-muted-foreground hover:text-foreground"
               }`}>
-              {f === "todos" ? "Todos" : f === "baixo" ? "Estoque baixo" : "Sem estoque"}
+              {f === "todos" ? "Todos" : f === "baixo" ? "Estoque baixo" : f === "zero" ? "Sem estoque" : "Vencendo"}
             </button>
           ))}
         </div>
-        <Button size="sm" variant="outline" onClick={() => { loaded.current = false; load(); }} className="gap-1.5">
+        <Button size="sm" variant="outline" onClick={load} className="gap-1.5">
           <RefreshCw className="h-3.5 w-3.5" />Atualizar
         </Button>
       </div>
@@ -2584,7 +3323,8 @@ function EstoqueTab({ isActive }: { isActive: boolean }) {
             <TableHeader>
               <TableRow>
                 <TableHead>Produto</TableHead>
-                <TableHead className="text-center">Estoque atual</TableHead>
+                <TableHead className="text-center">Estoque</TableHead>
+                <TableHead className="text-center hidden md:table-cell">Lote / Validade</TableHead>
                 <TableHead className="text-center hidden sm:table-cell">Mínimo</TableHead>
                 <TableHead className="text-center">Status</TableHead>
                 <TableHead className="text-right">Ajustar</TableHead>
@@ -2603,6 +3343,25 @@ function EstoqueTab({ isActive }: { isActive: boolean }) {
                     }`}>{p.stock}</span>
                   </TableCell>
                   <TableCell className="text-center text-sm text-muted-foreground hidden sm:table-cell">{p.stock_min}</TableCell>
+                  <TableCell className="text-center hidden md:table-cell">
+                    <div className="space-y-0.5">
+                      {p.lote && (
+                        <p className="text-xs text-muted-foreground flex items-center gap-1 justify-center">
+                          <Hash className="h-3 w-3" />{p.lote}
+                        </p>
+                      )}
+                      {p.validade && (
+                        <p className={`text-xs font-medium flex items-center gap-1 justify-center ${
+                          isVencido(p.validade) ? "text-red-600" :
+                          vencendo30.some(v => v.id === p.id) ? "text-amber-600" : "text-muted-foreground"
+                        }`}>
+                          <CalendarCheck className="h-3 w-3" />{fmtValidade(p.validade)}
+                        </p>
+                      )}
+                      {!p.lote && !p.validade && <span className="text-xs text-muted-foreground">—</span>}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-center hidden sm:table-cell text-sm text-muted-foreground">{p.stock_min}</TableCell>
                   <TableCell className="text-center"><StockBadge p={p} /></TableCell>
                   <TableCell className="text-right">
                     <Button size="sm" variant="outline" onClick={() => openAjuste(p)} className="gap-1.5">
@@ -2622,73 +3381,760 @@ function EstoqueTab({ isActive }: { isActive: boolean }) {
           <DialogHeader>
             <DialogTitle>Ajustar estoque</DialogTitle>
           </DialogHeader>
-          {produtoSel && (
-            <div className="space-y-4">
-              <div className="bg-secondary rounded-xl p-3">
-                <p className="font-semibold text-sm">{produtoSel.name}</p>
-                <p className="text-xs text-muted-foreground">{produtoSel.brand}</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Estoque atual: <strong>{produtoSel.stock}</strong> unidade{produtoSel.stock !== 1 ? "s" : ""}
-                </p>
-              </div>
+          {produtoSel && (() => {
+            const estoqueAtual = produtoSel.stock ?? 0;
+            const qty = Number(qtdAjuste) || 0;
+            const preview =
+              tipoAjuste === "entrada"    ? estoqueAtual + qty :
+              tipoAjuste === "saida"      ? Math.max(0, estoqueAtual - qty) :
+              qty;
 
-              <div className="space-y-1.5">
-                <Label>Tipo de ajuste</Label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {(["entrada", "saida", "inventario"] as const).map(t => (
-                    <button key={t} onClick={() => setTipoAjuste(t)}
-                      className={`py-2 rounded-lg text-xs font-medium border transition-colors ${
-                        tipoAjuste === t
-                          ? "bg-primary text-primary-foreground border-primary"
-                          : "border-border text-muted-foreground hover:text-foreground"
-                      }`}>
-                      {t === "entrada" ? "Entrada" : t === "saida" ? "Saida" : "Inventario"}
-                    </button>
-                  ))}
+            return (
+              <div className="space-y-4">
+                {/* Produto + estoque atual */}
+                <div className="bg-secondary rounded-xl p-3 flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-semibold text-sm">{produtoSel.name}</p>
+                    <p className="text-xs text-muted-foreground">{produtoSel.brand}</p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-2xl font-bold text-foreground leading-none">{estoqueAtual}</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">estoque atual</p>
+                  </div>
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {tipoAjuste === "entrada"    ? "Adiciona ao estoque atual (recebimento de mercadoria)" :
-                   tipoAjuste === "saida"      ? "Subtrai do estoque atual (perda, avaria...)" :
-                   "Define a quantidade exata (contagem fisica)"}
-                </p>
-              </div>
 
-              <div className="space-y-1.5">
-                <Label>{tipoAjuste === "inventario" ? "Quantidade real contada" : "Quantidade"}</Label>
-                <Input
-                  type="number" min="0"
-                  value={qtdAjuste}
-                  onChange={e => setQtdAjuste(e.target.value)}
-                  placeholder="0"
-                  onKeyDown={e => e.key === "Enter" && handleSaveAjuste()}
-                />
-              </div>
+                {/* Tipo de ajuste */}
+                <div className="space-y-1.5">
+                  <Label>Tipo de ajuste</Label>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(["entrada", "saida", "inventario"] as const).map(t => (
+                      <button key={t} onClick={() => setTipoAjuste(t)}
+                        className={`py-2 rounded-lg text-xs font-medium border transition-colors ${
+                          tipoAjuste === t
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "border-border text-muted-foreground hover:text-foreground"
+                        }`}>
+                        {t === "entrada" ? "+ Entrada" : t === "saida" ? "- Saída" : "= Inventário"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {tipoAjuste === "entrada"
+                      ? "Soma ao estoque — use ao receber mercadoria"
+                      : tipoAjuste === "saida"
+                      ? "Subtrai do estoque — use para avaria ou perda"
+                      : "Define o valor exato — use na contagem física"}
+                  </p>
+                </div>
 
-              <div className="space-y-1.5">
-                <Label>Estoque minimo (alerta)</Label>
-                <Input
-                  type="number" min="0"
-                  value={stockMinEdit}
-                  onChange={e => setStockMinEdit(e.target.value)}
-                  placeholder="5"
-                />
-              </div>
+                {/* Quantidade */}
+                <div className="space-y-1.5">
+                  <Label>{tipoAjuste === "inventario" ? "Quantidade contada" : "Quantidade"}</Label>
+                  <Input
+                    type="number" min="0"
+                    value={qtdAjuste}
+                    onChange={e => setQtdAjuste(e.target.value)}
+                    placeholder="0"
+                    onKeyDown={e => e.key === "Enter" && handleSaveAjuste()}
+                  />
+                </div>
 
-              <Button className="w-full" onClick={handleSaveAjuste} disabled={saving}>
-                {saving ? <><RefreshCw className="h-4 w-4 animate-spin mr-2" />Salvando...</> : "Salvar"}
-              </Button>
-            </div>
-          )}
+                {/* Preview do resultado */}
+                {qty > 0 && (
+                  <div className="flex items-center justify-between bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+                    <span className="text-xs text-muted-foreground">Resultado após salvar</span>
+                    <span className="font-bold text-primary text-sm">
+                      {preview} unidade{preview !== 1 ? "s" : ""}
+                    </span>
+                  </div>
+                )}
+
+                {/* Lote e Validade */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="flex items-center gap-1"><Hash className="h-3 w-3" />Lote</Label>
+                    <Input
+                      value={loteEdit}
+                      onChange={e => setLoteEdit(e.target.value)}
+                      placeholder="Ex: L2024001"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="flex items-center gap-1"><CalendarCheck className="h-3 w-3" />Validade</Label>
+                    <Input
+                      type="date"
+                      value={validadeEdit}
+                      onChange={e => setValidadeEdit(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {/* Fornecedor */}
+                {fornecedores.length > 0 && (
+                  <div className="space-y-1.5">
+                    <Label className="flex items-center gap-1"><Building2 className="h-3 w-3" />Fornecedor</Label>
+                    <select
+                      value={fornecedorEdit}
+                      onChange={e => setFornecedorEdit(e.target.value)}
+                      className="w-full border border-border rounded-md px-3 py-2 text-sm bg-background focus:outline-none focus:border-primary"
+                    >
+                      <option value="">— Nenhum —</option>
+                      {fornecedores.map(f => (
+                        <option key={f.id} value={f.id}>{f.nome}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Estoque mínimo */}
+                <div className="space-y-1.5">
+                  <Label>Estoque mínimo (alerta)</Label>
+                  <Input
+                    type="number" min="0"
+                    value={stockMinEdit}
+                    onChange={e => setStockMinEdit(e.target.value)}
+                    placeholder="5"
+                  />
+                </div>
+
+                <Button className="w-full" onClick={handleSaveAjuste} disabled={saving}>
+                  {saving ? <><RefreshCw className="h-4 w-4 animate-spin mr-2" />Salvando...</> : "Salvar ajuste"}
+                </Button>
+              </div>
+            );
+          })()}
         </DialogContent>
       </Dialog>
     </div>
   );
 }
 
-// ─── Aba Relatorios ───────────────────────────────────────────────────────────
-type PeriodKey = "hoje" | "semana" | "mes" | "mes_passado";
+// ─── Aba Fornecedores ─────────────────────────────────────────────────────────
+function FornecedoresTab({ isActive }: { isActive: boolean }) {
+  const [fornecedores, setFornecedores] = useState<Fornecedor[]>([]);
+  const [loading, setLoading]   = useState(false);
+  const [search, setSearch]     = useState("");
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing]   = useState<Fornecedor | null>(null);
+  const [saving, setSaving]     = useState(false);
 
-function getDateRange(period: PeriodKey): { start: Date; end: Date } {
+  const emptyForm: FornecedorInput = { nome: "", cnpj: "", telefone: "", email: "", contato: "", observacoes: "" };
+  const [form, setForm] = useState<FornecedorInput>(emptyForm);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setFornecedores(await fetchFornecedores()); }
+    catch { toast.error("Erro ao carregar fornecedores"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { if (isActive) load(); }, [isActive, load]);
+
+  function openNew() {
+    setEditing(null);
+    setForm(emptyForm);
+    setFormOpen(true);
+  }
+
+  function openEdit(f: Fornecedor) {
+    setEditing(f);
+    setForm({ nome: f.nome, cnpj: f.cnpj ?? "", telefone: f.telefone ?? "",
+              email: f.email ?? "", contato: f.contato ?? "", observacoes: f.observacoes ?? "" });
+    setFormOpen(true);
+  }
+
+  async function handleSave() {
+    if (!form.nome.trim()) { toast.error("Nome obrigatório"); return; }
+    setSaving(true);
+    try {
+      if (editing) {
+        await updateFornecedor(editing.id, form);
+        setFornecedores(prev => prev.map(f => f.id === editing.id ? { ...f, ...form } : f));
+        toast.success("Fornecedor atualizado");
+      } else {
+        await createFornecedor(form);
+        await load();
+        toast.success("Fornecedor cadastrado");
+      }
+      setFormOpen(false);
+    } catch { toast.error("Erro ao salvar"); }
+    finally { setSaving(false); }
+  }
+
+  async function toggleAtivo(f: Fornecedor) {
+    try {
+      await updateFornecedor(f.id, { is_active: !f.is_active });
+      setFornecedores(prev => prev.map(x => x.id === f.id ? { ...x, is_active: !x.is_active } : x));
+    } catch { toast.error("Erro ao atualizar"); }
+  }
+
+  const filtered = fornecedores.filter(f =>
+    !search.trim() ||
+    f.nome.toLowerCase().includes(search.toLowerCase()) ||
+    (f.cnpj ?? "").includes(search) ||
+    (f.contato ?? "").toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="space-y-4">
+      {/* Toolbar */}
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar fornecedor..." className="pl-9" />
+        </div>
+        <Button onClick={openNew} className="gap-1.5 shrink-0">
+          <Plus className="h-4 w-4" />Novo fornecedor
+        </Button>
+      </div>
+
+      {/* Lista */}
+      <div className="bg-background rounded-xl border border-border overflow-hidden">
+        {loading ? (
+          <div className="p-12 text-center text-sm text-muted-foreground">
+            <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />Carregando...
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="p-12 text-center">
+            <Building2 className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+            <p className="text-sm text-muted-foreground">
+              {search ? "Nenhum fornecedor encontrado." : "Nenhum fornecedor cadastrado ainda."}
+            </p>
+          </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Fornecedor</TableHead>
+                <TableHead className="hidden sm:table-cell">Contato</TableHead>
+                <TableHead className="hidden md:table-cell">CNPJ</TableHead>
+                <TableHead className="text-center">Status</TableHead>
+                <TableHead className="text-right">Ações</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.map(f => (
+                <TableRow key={f.id} className={!f.is_active ? "opacity-50" : ""}>
+                  <TableCell>
+                    <p className="font-medium text-sm">{f.nome}</p>
+                    {f.email && <p className="text-xs text-muted-foreground">{f.email}</p>}
+                  </TableCell>
+                  <TableCell className="hidden sm:table-cell">
+                    <div className="space-y-0.5">
+                      {f.contato && <p className="text-xs">{f.contato}</p>}
+                      {f.telefone && (
+                        <p className="text-xs text-muted-foreground flex items-center gap-1">
+                          <PhoneCall className="h-3 w-3" />{f.telefone}
+                        </p>
+                      )}
+                    </div>
+                  </TableCell>
+                  <TableCell className="hidden md:table-cell text-xs text-muted-foreground">{f.cnpj || "—"}</TableCell>
+                  <TableCell className="text-center">
+                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                      f.is_active ? "bg-green-100 text-green-700" : "bg-secondary text-muted-foreground"
+                    }`}>
+                      {f.is_active ? "Ativo" : "Inativo"}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex items-center gap-1 justify-end">
+                      <Button size="sm" variant="ghost" onClick={() => openEdit(f)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => toggleAtivo(f)}
+                        className={f.is_active ? "text-amber-600 hover:text-amber-700" : "text-green-600 hover:text-green-700"}>
+                        {f.is_active ? <Ban className="h-3.5 w-3.5" /> : <BadgeCheck className="h-3.5 w-3.5" />}
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+
+      {/* Formulário */}
+      <Dialog open={formOpen} onOpenChange={setFormOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{editing ? "Editar fornecedor" : "Novo fornecedor"}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label>Nome *</Label>
+              <Input value={form.nome} onChange={e => setForm(p => ({ ...p, nome: e.target.value }))} placeholder="Nome da empresa" />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>CNPJ</Label>
+                <Input value={form.cnpj} onChange={e => setForm(p => ({ ...p, cnpj: e.target.value }))} placeholder="00.000.000/0001-00" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Telefone</Label>
+                <Input value={form.telefone} onChange={e => setForm(p => ({ ...p, telefone: e.target.value }))} placeholder="(11) 99999-9999" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>E-mail</Label>
+                <Input value={form.email} onChange={e => setForm(p => ({ ...p, email: e.target.value }))} placeholder="contato@empresa.com" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Representante</Label>
+                <Input value={form.contato} onChange={e => setForm(p => ({ ...p, contato: e.target.value }))} placeholder="Nome do contato" />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Observações</Label>
+              <Input value={form.observacoes} onChange={e => setForm(p => ({ ...p, observacoes: e.target.value }))} placeholder="Prazo de entrega, condições, etc." />
+            </div>
+            <Button className="w-full" onClick={handleSave} disabled={saving}>
+              {saving ? <><RefreshCw className="h-4 w-4 animate-spin mr-2" />Salvando...</> : "Salvar"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ─── Aba Fechamento de Caixa ──────────────────────────────────────────────────
+function CaixaTab({ isActive }: { isActive: boolean }) {
+  const [caixaHoje,       setCaixaHoje]       = useState<CaixaFechamento | null>(null);
+  const [historico,       setHistorico]       = useState<CaixaFechamento[]>([]);
+  const [pendentes,       setPendentes]       = useState<CaixaFechamento[]>([]);
+  const [pendenteSel,     setPendenteSel]     = useState<CaixaFechamento | null>(null);
+  const [obsFechar,       setObsFechar]       = useState("");
+  const [fechandoDialog,  setFechandoDialog]  = useState(false);
+  const [fechandoPendente,setFechandoPendente]= useState(false);
+  const [loading,         setLoading]         = useState(false);
+  const [syncing,         setSyncing]         = useState(false);
+  const [saving,          setSaving]          = useState(false);
+  const [saldoInicial,    setSaldoInicial]    = useState("");
+  const [obs,             setObs]             = useState("");
+  const [migracaoFalta,   setMigracaoFalta]   = useState(false);
+
+  const fmt = (v: number) => v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  const fmtData = (iso: string) => {
+    const [y, m, d] = iso.split("-");
+    return `${d}/${m}/${y}`;
+  };
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setMigracaoFalta(false);
+    try {
+      const [hoje, hist, pend] = await Promise.all([
+        fetchOuCriarCaixaHoje(),
+        fetchFechamentos(30),
+        fetchCaixasPendentes(),
+      ]);
+      setCaixaHoje(hoje);
+      setHistorico(hist.filter(h => h.data !== hoje.data));
+      setSaldoInicial(hoje.saldo_inicial > 0 ? String(hoje.saldo_inicial) : "");
+      setObs(hoje.observacoes ?? "");
+      setPendentes(pend);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("42P01") || msg.includes("does not exist") || msg.includes("relation")) {
+        setMigracaoFalta(true);
+      } else {
+        toast.error("Erro ao carregar caixa: " + msg.slice(0, 100));
+      }
+    }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { if (isActive) load(); }, [isActive, load]);
+
+  // ── Funções de fechamento de caixas pendentes ────────────────────────────────
+  function abrirFecharPendente(c: CaixaFechamento) {
+    setPendenteSel(c);
+    setObsFechar(c.observacoes ?? "");
+    setFechandoDialog(true);
+  }
+
+  async function confirmarFecharPendente() {
+    if (!pendenteSel) return;
+    const p      = pendenteSel;
+    const motivo = obsFechar.trim() || "Fechamento tardio";
+    setFechandoPendente(true);
+    try {
+      await salvarCaixa(p.id, { status: "fechado", observacoes: motivo });
+      setPendentes(prev => prev.filter(x => x.id !== p.id));
+      setHistorico(prev => prev.map(h =>
+        h.id === p.id ? { ...h, status: "fechado" as const, observacoes: motivo } : h
+      ));
+      setFechandoDialog(false);
+      toast.success(`Caixa de ${fmtData(p.data)} fechado!`);
+    } catch { toast.error("Erro ao fechar caixa pendente"); }
+    finally { setFechandoPendente(false); }
+  }
+
+  async function fecharTodosPendentes() {
+    const lista  = pendentes;
+    const motivo = "Fechamento tardio automático";
+    setFechandoPendente(true);
+    try {
+      await Promise.all(lista.map(p => salvarCaixa(p.id, { status: "fechado", observacoes: motivo })));
+      const ids = new Set(lista.map(p => p.id));
+      setHistorico(prev => prev.map(h =>
+        ids.has(h.id) ? { ...h, status: "fechado" as const, observacoes: motivo } : h
+      ));
+      setPendentes([]);
+      toast.success(`${lista.length} caixa${lista.length > 1 ? "s" : ""} fechado${lista.length > 1 ? "s" : ""}!`);
+    } catch { toast.error("Erro ao fechar caixas pendentes"); }
+    finally { setFechandoPendente(false); }
+  }
+
+  async function syncTotais() {
+    if (!caixaHoje) return;
+    setSyncing(true);
+    try {
+      const resumo = await calcularResumoHoje();
+      const saldoIni = Number(saldoInicial) || 0;
+      const totalEntradas = resumo.total_dinheiro + resumo.total_pix + resumo.total_cartao;
+      const saldoFinal = saldoIni + resumo.total_dinheiro - resumo.total_saidas;
+      await salvarCaixa(caixaHoje.id, {
+        saldo_inicial:   saldoIni,
+        total_dinheiro:  resumo.total_dinheiro,
+        total_pix:       resumo.total_pix,
+        total_cartao:    resumo.total_cartao,
+        total_saidas:    resumo.total_saidas,
+        saldo_final:     saldoFinal,
+        observacoes:     obs || null,
+      });
+      setCaixaHoje(prev => prev ? {
+        ...prev, ...resumo, saldo_inicial: saldoIni,
+        saldo_final: saldoFinal, observacoes: obs || null,
+      } : prev);
+      toast.success("Totais sincronizados dos pedidos de hoje");
+    } catch { toast.error("Erro ao sincronizar"); }
+    finally { setSyncing(false); }
+  }
+
+  async function fecharCaixa() {
+    if (!caixaHoje) return;
+    setSaving(true);
+    try {
+      const novoStatus = caixaHoje.status === "fechado" ? "aberto" : "fechado";
+      await salvarCaixa(caixaHoje.id, { status: novoStatus, observacoes: obs || null,
+        saldo_inicial: Number(saldoInicial) || 0 });
+      setCaixaHoje(prev => prev ? { ...prev, status: novoStatus } : prev);
+      toast.success(novoStatus === "fechado" ? "Caixa fechado!" : "Caixa reaberto");
+    } catch { toast.error("Erro ao fechar caixa"); }
+    finally { setSaving(false); }
+  }
+
+  if (loading) return (
+    <div className="p-12 text-center text-sm text-muted-foreground">
+      <RefreshCw className="h-5 w-5 animate-spin mx-auto mb-2" />Carregando...
+    </div>
+  );
+
+  if (migracaoFalta) return (
+    <div className="max-w-lg mx-auto mt-10">
+      <div className="bg-amber-50 border border-amber-300 rounded-xl p-6 space-y-4">
+        <div className="flex items-center gap-3">
+          <AlertTriangle className="h-6 w-6 text-amber-500 shrink-0" />
+          <h3 className="font-semibold text-amber-800">Migração pendente</h3>
+        </div>
+        <p className="text-sm text-amber-700 leading-relaxed">
+          As tabelas de <strong>Fechamento de Caixa</strong> e <strong>Fornecedores</strong> ainda não foram criadas no banco de dados.
+        </p>
+        <p className="text-sm text-amber-700">
+          Execute o arquivo <code className="bg-amber-100 px-1.5 py-0.5 rounded text-xs font-mono">migration_v2.sql</code> no <strong>Supabase → SQL Editor</strong> e volte aqui.
+        </p>
+        <ol className="text-sm text-amber-700 list-decimal list-inside space-y-1">
+          <li>Abra o painel do Supabase</li>
+          <li>Vá em <strong>SQL Editor</strong></li>
+          <li>Cole e execute o conteúdo de <code className="bg-amber-100 px-1 rounded text-xs font-mono">migration_v2.sql</code></li>
+          <li>Volte aqui e recarregue a página</li>
+        </ol>
+        <Button variant="outline" size="sm" className="gap-1.5" onClick={load}>
+          <RefreshCw className="h-3.5 w-3.5" />
+          Tentar novamente
+        </Button>
+      </div>
+    </div>
+  );
+
+  const isFechado = caixaHoje?.status === "fechado";
+  const totalEntradas = (caixaHoje?.total_dinheiro ?? 0) + (caixaHoje?.total_pix ?? 0) + (caixaHoje?.total_cartao ?? 0);
+
+  return (
+    <div className="space-y-5 max-w-2xl">
+
+      {/* ── Dialog: fechar caixa pendente ────────────────────────────────── */}
+      <Dialog open={fechandoDialog} onOpenChange={v => { if (!fechandoPendente) setFechandoDialog(v); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-500" />
+              Fechar caixa — {pendenteSel && fmtData(pendenteSel.data)}
+            </DialogTitle>
+          </DialogHeader>
+          {pendenteSel && (
+            <div className="space-y-4">
+              {/* Resumo dos valores */}
+              <div className="bg-secondary rounded-lg p-4 space-y-2 text-sm">
+                {[
+                  { label: "Dinheiro", v: pendenteSel.total_dinheiro, cls: "text-green-600" },
+                  { label: "PIX",      v: pendenteSel.total_pix,      cls: "text-blue-600"  },
+                  { label: "Cartão",   v: pendenteSel.total_cartao,   cls: "text-purple-600"},
+                  { label: "Saídas",   v: pendenteSel.total_saidas,   cls: "text-red-600"   },
+                ].map(({ label, v, cls }) => (
+                  <div key={label} className="flex justify-between">
+                    <span className="text-muted-foreground">{label}</span>
+                    <span className={`font-medium ${cls}`}>{fmt(v)}</span>
+                  </div>
+                ))}
+                <div className="border-t border-border pt-2 flex justify-between font-semibold">
+                  <span>Saldo final</span>
+                  <span className={pendenteSel.saldo_final >= 0 ? "text-foreground" : "text-red-600"}>
+                    {fmt(pendenteSel.saldo_final)}
+                  </span>
+                </div>
+              </div>
+              {/* Motivo */}
+              <div className="space-y-1.5">
+                <Label className="text-xs">Motivo do fechamento tardio <span className="text-muted-foreground">(recomendado)</span></Label>
+                <Input
+                  value={obsFechar}
+                  onChange={e => setObsFechar(e.target.value)}
+                  placeholder="Ex: Operador esqueceu, sistema indisponível..."
+                  disabled={fechandoPendente}
+                />
+              </div>
+              <Button
+                className="w-full gap-2 bg-green-600 hover:bg-green-700"
+                onClick={confirmarFecharPendente}
+                disabled={fechandoPendente}
+              >
+                {fechandoPendente
+                  ? <><RefreshCw className="h-4 w-4 animate-spin" />Fechando...</>
+                  : <><LockKeyhole className="h-4 w-4" />Confirmar fechamento</>
+                }
+              </Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Alerta: caixas não fechados ───────────────────────────────────── */}
+      {pendentes.length > 0 && (
+        <div className="bg-red-50 border border-red-300 rounded-xl overflow-hidden">
+          <div className="px-5 py-3 bg-red-100 flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-red-600 shrink-0" />
+            <p className="font-semibold text-red-800 text-sm flex-1">
+              {pendentes.length === 1
+                ? "1 caixa não foi fechado no dia anterior"
+                : `${pendentes.length} caixas não foram fechados`}
+            </p>
+          </div>
+          <div className="p-4 space-y-2">
+            {pendentes.map(p => {
+              const ent = p.total_dinheiro + p.total_pix + p.total_cartao;
+              return (
+                <div key={p.id} className="flex items-center justify-between bg-white border border-red-200 rounded-lg px-4 py-2.5 gap-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold">{fmtData(p.data)}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Entradas: {fmt(ent)} · Saldo: {fmt(p.saldo_final)}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm" variant="outline"
+                    className="gap-1.5 border-red-300 text-red-700 hover:bg-red-50 shrink-0"
+                    onClick={() => abrirFecharPendente(p)}
+                  >
+                    <LockKeyhole className="h-3.5 w-3.5" />
+                    Revisar e fechar
+                  </Button>
+                </div>
+              );
+            })}
+            {pendentes.length > 1 && (
+              <Button
+                size="sm" variant="outline"
+                className="w-full gap-1.5 text-red-700 border-red-300 hover:bg-red-50 mt-1"
+                onClick={fecharTodosPendentes}
+                disabled={fechandoPendente}
+              >
+                {fechandoPendente
+                  ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" />Fechando...</>
+                  : <><LockKeyhole className="h-3.5 w-3.5" />Fechar todos de uma vez</>
+                }
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Caixa de hoje */}
+      {caixaHoje && (
+        <div className={`bg-background border rounded-xl overflow-hidden ${isFechado ? "border-green-300" : "border-border"}`}>
+          {/* Header */}
+          <div className={`px-5 py-3 flex items-center justify-between ${isFechado ? "bg-green-50" : "bg-secondary"}`}>
+            <div className="flex items-center gap-2">
+              <Landmark className="h-4 w-4 text-primary" />
+              <span className="font-semibold text-sm">Caixa de hoje — {fmtData(caixaHoje.data)}</span>
+            </div>
+            <span className={`flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full ${
+              isFechado ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"
+            }`}>
+              {isFechado ? <LockKeyhole className="h-3 w-3" /> : <LockKeyholeOpen className="h-3 w-3" />}
+              {isFechado ? "Fechado" : "Aberto"}
+            </span>
+          </div>
+
+          <div className="p-5 space-y-4">
+            {/* Saldo inicial */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1 space-y-1">
+                <Label className="text-xs">Saldo inicial (dinheiro em caixa)</Label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">R$</span>
+                  <Input
+                    type="number" min="0" step="0.01"
+                    className="pl-9"
+                    value={saldoInicial}
+                    onChange={e => setSaldoInicial(e.target.value)}
+                    placeholder="0,00"
+                    disabled={isFechado}
+                  />
+                </div>
+              </div>
+              <Button variant="outline" size="sm" onClick={syncTotais} disabled={syncing || isFechado} className="gap-1.5 mt-6 shrink-0">
+                <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`} />
+                Sincronizar
+              </Button>
+            </div>
+
+            {/* Totais */}
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                { label: "Dinheiro", value: caixaHoje.total_dinheiro, color: "text-green-600", icon: Banknote },
+                { label: "PIX",      value: caixaHoje.total_pix,      color: "text-blue-600",  icon: Smartphone },
+                { label: "Cartão",   value: caixaHoje.total_cartao,   color: "text-purple-600",icon: CreditCard },
+                { label: "Saídas",   value: caixaHoje.total_saidas,   color: "text-red-600",   icon: ArrowDownCircle },
+              ].map(({ label, value, color, icon: Icon }) => (
+                <div key={label} className="bg-secondary rounded-lg p-3 flex items-center gap-2">
+                  <Icon className={`h-4 w-4 shrink-0 ${color}`} />
+                  <div>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wide">{label}</p>
+                    <p className={`text-sm font-bold ${color}`}>{fmt(value)}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Total entradas + saldo final */}
+            <div className="border-t border-border pt-3 space-y-2">
+              <div className="flex justify-between text-sm text-muted-foreground">
+                <span>Total vendas</span>
+                <span className="font-medium text-foreground">{fmt(totalEntradas)}</span>
+              </div>
+              <div className="flex justify-between text-base font-bold">
+                <span>Saldo final (caixa físico)</span>
+                <span className={caixaHoje.saldo_final >= 0 ? "text-green-600" : "text-red-600"}>
+                  {fmt(caixaHoje.saldo_final)}
+                </span>
+              </div>
+              <p className="text-[10px] text-muted-foreground">
+                Saldo final = Saldo inicial + Dinheiro - Saídas. Clique em "Sincronizar" para recalcular com os pedidos do dia.
+              </p>
+            </div>
+
+            {/* Observações */}
+            <div className="space-y-1.5">
+              <Label className="text-xs">Observações do dia</Label>
+              <Input
+                value={obs}
+                onChange={e => setObs(e.target.value)}
+                placeholder="Qualquer anotação do dia..."
+                disabled={isFechado}
+              />
+            </div>
+
+            {/* Fechar/Abrir */}
+            <Button
+              className={`w-full gap-2 ${isFechado ? "" : "bg-green-600 hover:bg-green-700"}`}
+              variant={isFechado ? "outline" : "default"}
+              onClick={fecharCaixa}
+              disabled={saving}
+            >
+              {saving
+                ? <><RefreshCw className="h-4 w-4 animate-spin" />Salvando...</>
+                : isFechado
+                ? <><LockKeyholeOpen className="h-4 w-4" />Reabrir caixa</>
+                : <><LockKeyhole className="h-4 w-4" />Fechar caixa do dia</>
+              }
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Histórico */}
+      {historico.length > 0 && (
+        <div className="bg-background border border-border rounded-xl overflow-hidden">
+          <div className="px-5 py-3 border-b border-border">
+            <p className="text-sm font-semibold">Histórico de fechamentos</p>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Data</TableHead>
+                <TableHead className="text-right hidden sm:table-cell">Entradas</TableHead>
+                <TableHead className="text-right hidden sm:table-cell">Saídas</TableHead>
+                <TableHead className="text-right">Saldo final</TableHead>
+                <TableHead className="text-center">Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {historico.map(h => {
+                const entradas = h.total_dinheiro + h.total_pix + h.total_cartao;
+                return (
+                  <TableRow key={h.id}>
+                    <TableCell className="font-medium text-sm">{fmtData(h.data)}</TableCell>
+                    <TableCell className="text-right text-xs text-green-600 hidden sm:table-cell">{fmt(entradas)}</TableCell>
+                    <TableCell className="text-right text-xs text-red-600 hidden sm:table-cell">{fmt(h.total_saidas)}</TableCell>
+                    <TableCell className={`text-right font-semibold text-sm ${h.saldo_final >= 0 ? "text-foreground" : "text-red-600"}`}>
+                      {fmt(h.saldo_final)}
+                    </TableCell>
+                    <TableCell className="text-center">
+                      {h.status === "fechado" ? (
+                        <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700">
+                          Fechado
+                        </span>
+                      ) : (
+                        <Button
+                          size="sm" variant="outline"
+                          className="h-7 gap-1 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                          onClick={() => abrirFecharPendente(h)}
+                        >
+                          <LockKeyhole className="h-3 w-3" />
+                          Fechar
+                        </Button>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Aba Relatorios ───────────────────────────────────────────────────────────
+type PeriodKey = "hoje" | "semana" | "mes" | "mes_passado" | "personalizado";
+
+function getDateRange(period: Exclude<PeriodKey, "personalizado">): { start: Date; end: Date } {
   const now   = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   if (period === "hoje") {
@@ -2709,11 +4155,30 @@ function getDateRange(period: PeriodKey): { start: Date; end: Date } {
   };
 }
 
+function resolveRange(period: PeriodKey, customStart: string, customEnd: string): { start: Date; end: Date } {
+  if (period === "personalizado" && customStart && customEnd) {
+    return {
+      start: new Date(customStart + "T00:00:00"),
+      end:   new Date(customEnd   + "T23:59:59"),
+    };
+  }
+  if (period === "personalizado") {
+    const now = new Date();
+    return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now };
+  }
+  return getDateRange(period);
+}
+
 function RelatoriosTab({ isActive }: { isActive: boolean }) {
   const [orders,  setOrders]  = useState<Order[]>([]);
   const [loading, setLoading] = useState(false);
   const loaded = useRef(false);
   const [period, setPeriod]   = useState<PeriodKey>("mes");
+  const [customStart, setCustomStart] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+  });
+  const [customEnd, setCustomEnd] = useState(() => new Date().toISOString().slice(0, 10));
   const [pdfOpen,    setPdfOpen]    = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfSecoes,  setPdfSecoes]  = useState<PDFSecoes>({
@@ -2738,7 +4203,7 @@ function RelatoriosTab({ isActive }: { isActive: boolean }) {
     if (isActive && !loaded.current) load();
   }, [isActive, load]);
 
-  const range = getDateRange(period);
+  const range = resolveRange(period, customStart, customEnd);
 
   const pedidosPeriod = useMemo(() =>
     orders.filter(o => {
@@ -2799,20 +4264,24 @@ function RelatoriosTab({ isActive }: { isActive: boolean }) {
   }, [pedidosPeriod]);
 
   const PERIOD_OPTIONS: { key: PeriodKey; label: string }[] = [
-    { key: "hoje",        label: "Hoje"         },
-    { key: "semana",      label: "Esta semana"  },
-    { key: "mes",         label: "Este mes"     },
-    { key: "mes_passado", label: "Mes passado"  },
+    { key: "hoje",         label: "Hoje"          },
+    { key: "semana",       label: "Esta semana"   },
+    { key: "mes",          label: "Este mes"      },
+    { key: "mes_passado",  label: "Mes passado"   },
+    { key: "personalizado",label: "Personalizado" },
   ];
 
   const handleGerarPDF = useCallback(async () => {
     setPdfLoading(true);
     try {
+      const r = resolveRange(period, customStart, customEnd);
+
+      // Para fluxo de caixa: busca o mês inicial do intervalo
       const mesMes = period === "mes_passado"
         ? (() => { const d = new Date(); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); })()
+        : period === "personalizado" && customStart
+        ? customStart.slice(0, 7)
         : new Date().toISOString().slice(0, 7);
-
-      const r = getDateRange(period);
 
       const [fluxoData, contasData, colaboradoresData] = await Promise.all([
         pdfSecoes.fluxoCaixa ? fetchFluxoCombinado(mesMes) : Promise.resolve([]),
@@ -2825,7 +4294,10 @@ function RelatoriosTab({ isActive }: { isActive: boolean }) {
         return d >= r.start && d <= r.end;
       });
 
-      const periodLabel = PERIOD_OPTIONS.find(o => o.key === period)?.label ?? period;
+      const fmtD = (s: string) => `${s.slice(8, 10)}/${s.slice(5, 7)}/${s.slice(0, 4)}`;
+      const periodLabel = period === "personalizado" && customStart && customEnd
+        ? `${fmtD(customStart)} a ${fmtD(customEnd)}`
+        : PERIOD_OPTIONS.find(o => o.key === period)?.label ?? period;
 
       gerarRelatorioPDF({
         titulo:  "Relatorio de Desempenho",
@@ -2852,30 +4324,63 @@ function RelatoriosTab({ isActive }: { isActive: boolean }) {
     } finally {
       setPdfLoading(false);
     }
-  }, [pdfSecoes, period, pedidosPeriod, faturamento, ticketMedio, totalItens, PERIOD_OPTIONS]);
+  }, [pdfSecoes, period, customStart, customEnd, pedidosPeriod, faturamento, ticketMedio, totalItens, PERIOD_OPTIONS]);
 
   return (
     <div className="space-y-5">
       {/* Period selector */}
-      <div className="flex flex-wrap items-center gap-1.5">
-        {PERIOD_OPTIONS.map(o => (
-          <button key={o.key} onClick={() => setPeriod(o.key)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              period === o.key
-                ? "bg-primary text-primary-foreground"
-                : "bg-background border border-border text-muted-foreground hover:text-foreground"
-            }`}>
-            {o.label}
-          </button>
-        ))}
-        <div className="ml-auto flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={() => { loaded.current = false; load(); }} className="gap-1.5">
-            <RefreshCw className="h-3.5 w-3.5" />Atualizar
-          </Button>
-          <Button size="sm" onClick={() => setPdfOpen(true)} className="gap-1.5">
-            <FileDown className="h-3.5 w-3.5" />Gerar PDF
-          </Button>
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {PERIOD_OPTIONS.map(o => (
+            <button key={o.key} onClick={() => setPeriod(o.key)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                period === o.key
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background border border-border text-muted-foreground hover:text-foreground"
+              }`}>
+              {o.label}
+            </button>
+          ))}
+          <div className="ml-auto flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => { loaded.current = false; load(); }} className="gap-1.5">
+              <RefreshCw className="h-3.5 w-3.5" />Atualizar
+            </Button>
+            <Button size="sm" onClick={() => setPdfOpen(true)} className="gap-1.5">
+              <FileDown className="h-3.5 w-3.5" />Gerar PDF
+            </Button>
+          </div>
         </div>
+
+        {period === "personalizado" && (
+          <div className="flex flex-wrap items-center gap-3 p-3 bg-muted/40 rounded-lg border border-border">
+            <div className="flex items-center gap-2">
+              <Label className="text-xs text-muted-foreground whitespace-nowrap">De</Label>
+              <Input
+                type="date"
+                value={customStart}
+                max={customEnd}
+                onChange={e => setCustomStart(e.target.value)}
+                className="h-8 text-xs w-36"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Label className="text-xs text-muted-foreground whitespace-nowrap">Ate</Label>
+              <Input
+                type="date"
+                value={customEnd}
+                min={customStart}
+                max={new Date().toISOString().slice(0, 10)}
+                onChange={e => setCustomEnd(e.target.value)}
+                className="h-8 text-xs w-36"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {customStart && customEnd
+                ? `${new Date(customStart + "T00:00:00").toLocaleDateString("pt-BR")} — ${new Date(customEnd + "T00:00:00").toLocaleDateString("pt-BR")}`
+                : "Selecione as datas"}
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Cards resumo */}
@@ -2974,9 +4479,11 @@ function RelatoriosTab({ isActive }: { isActive: boolean }) {
           </DialogHeader>
 
           <p className="text-xs text-muted-foreground -mt-1">
-            Periodo selecionado:{" "}
+            Periodo:{" "}
             <span className="font-medium text-foreground">
-              {PERIOD_OPTIONS.find(o => o.key === period)?.label}
+              {period === "personalizado" && customStart && customEnd
+                ? `${new Date(customStart + "T00:00:00").toLocaleDateString("pt-BR")} — ${new Date(customEnd + "T00:00:00").toLocaleDateString("pt-BR")}`
+                : PERIOD_OPTIONS.find(o => o.key === period)?.label}
             </span>
           </p>
 
@@ -3718,6 +5225,140 @@ function ContasTab({ isActive }: { isActive: boolean }) {
   );
 }
 
+// ─── Aba Configurações ────────────────────────────────────────────────────────
+function ConfigTab({ isActive }: { isActive: boolean }) {
+  const [cfg,     setCfg]     = useState<ConfigCartao>({ taxa_pct: 2.5, parcelas_max: 6, juros_a_partir_de: 2 });
+  const [loading, setLoading] = useState(false);
+  const [saving,  setSaving]  = useState(false);
+  const loaded = useRef(false);
+
+  useEffect(() => {
+    if (!isActive || loaded.current) return;
+    setLoading(true);
+    fetchConfig()
+      .then((c) => { setCfg(c.cartao); loaded.current = true; })
+      .finally(() => setLoading(false));
+  }, [isActive]);
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await saveConfigCartao(cfg);
+      toast.success("Configurações salvas!");
+    } catch { toast.error("Erro ao salvar configurações."); }
+    finally { setSaving(false); }
+  }
+
+  // Preview das parcelas
+  const parcelas = calcularParcelas(100, cfg); // usa R$100 como base para mostrar %
+
+  return (
+    <div className="space-y-6 max-w-2xl">
+
+      {/* ── Taxa de cartão ── */}
+      <div className="bg-background border border-border rounded-xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-border flex items-center gap-2">
+          <SlidersHorizontal className="h-4 w-4 text-primary" />
+          <h3 className="font-semibold text-sm">Taxa de cartão de crédito</h3>
+        </div>
+        <div className="p-5 space-y-5">
+          {loading ? (
+            <p className="text-sm text-muted-foreground">Carregando...</p>
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <Label className="text-xs">Taxa por parcela (%)</Label>
+                  <div className="relative mt-1">
+                    <Input
+                      type="number" min={0} max={20} step={0.1}
+                      value={cfg.taxa_pct}
+                      onChange={e => setCfg(p => ({ ...p, taxa_pct: Number(e.target.value) }))}
+                      className="pr-8"
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">%</span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">Acréscimo por parcela acima do mínimo</p>
+                </div>
+                <div>
+                  <Label className="text-xs">Parcelas máximas</Label>
+                  <Input
+                    type="number" min={1} max={24} step={1}
+                    value={cfg.parcelas_max}
+                    onChange={e => setCfg(p => ({ ...p, parcelas_max: Number(e.target.value) }))}
+                    className="mt-1"
+                  />
+                  <p className="text-[11px] text-muted-foreground mt-1">Máximo de vezes disponíveis</p>
+                </div>
+                <div>
+                  <Label className="text-xs">Juros a partir de</Label>
+                  <div className="relative mt-1">
+                    <Input
+                      type="number" min={1} max={cfg.parcelas_max} step={1}
+                      value={cfg.juros_a_partir_de}
+                      onChange={e => setCfg(p => ({ ...p, juros_a_partir_de: Number(e.target.value) }))}
+                      className="pr-5"
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">x</span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">Parcelas sem juros antes disso</p>
+                </div>
+              </div>
+
+              {/* Preview tabela */}
+              <div>
+                <p className="text-xs font-semibold text-muted-foreground mb-2">
+                  Preview — parcelas para R$ 100,00
+                </p>
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-muted/40 text-muted-foreground">
+                        <th className="px-3 py-2 text-left font-medium">Parcelas</th>
+                        <th className="px-3 py-2 text-right font-medium">Valor / parcela</th>
+                        <th className="px-3 py-2 text-right font-medium">Total</th>
+                        <th className="px-3 py-2 text-right font-medium">Juros</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {parcelas.map(p => (
+                        <tr key={p.parcelas} className="hover:bg-muted/20">
+                          <td className="px-3 py-2 font-medium">{p.parcelas}x</td>
+                          <td className="px-3 py-2 text-right">
+                            {p.valorParcela.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            {p.totalFinal.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            {p.temJuros ? (
+                              <span className="text-amber-600 font-medium">
+                                +{((p.totalFinal - 100) / 100 * 100).toFixed(1)}%
+                              </span>
+                            ) : (
+                              <span className="text-green-600 font-medium">Sem juros</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <Button onClick={handleSave} disabled={saving} className="gap-1.5">
+                {saving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                {saving ? "Salvando..." : "Salvar configurações"}
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
 // ─── Aba Comissoes ────────────────────────────────────────────────────────────
 function ComissoesTab({ isActive }: { isActive: boolean }) {
   const now = new Date();
@@ -3913,6 +5554,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "FINANCEIRO",
     items: [
+      { id: "caixa",         label: "Fechamento",      icon: Landmark      },
       { id: "fluxo-caixa",   label: "Fluxo de Caixa", icon: Wallet        },
       { id: "contas",        label: "Contas",          icon: CreditCard    },
       { id: "metas",         label: "Metas",           icon: Target        },
@@ -3928,12 +5570,19 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    label: "SISTEMA",
+    items: [
+      { id: "configuracoes", label: "Configurações", icon: Settings },
+    ],
+  },
+  {
     label: "CATÁLOGO",
     items: [
-      { id: "estoque",  label: "Estoque",      icon: Boxes      },
-      { id: "produtos", label: "Produtos",     icon: Package    },
-      { id: "secoes",   label: "Secoes",       icon: LayoutList },
-      { id: "banners",  label: "Banners",      icon: ImageIcon  },
+      { id: "estoque",      label: "Estoque",      icon: Boxes      },
+      { id: "fornecedores", label: "Fornecedores", icon: Building2  },
+      { id: "produtos",     label: "Produtos",     icon: Package    },
+      { id: "secoes",       label: "Secoes",       icon: LayoutList },
+      { id: "banners",      label: "Banners",      icon: ImageIcon  },
     ],
   },
 ];
@@ -3951,15 +5600,347 @@ const PAGE_TITLES: Record<string, { title: string; sub: string }> = {
   cupons:          { title: "Cupons de desconto", sub: "Crie e gerencie codigos promocionais para seus clientes." },
   contas:          { title: "Contas a pagar/receber", sub: "Controle seus compromissos financeiros e recebimentos." },
   comissoes:       { title: "Comissoes",         sub: "Calcule automaticamente as comissoes dos colaboradores por mes." },
+  configuracoes:   { title: "Configurações",     sub: "Taxa de cartão, parcelas e outras preferências do sistema." },
+  caixa:           { title: "Fechamento de Caixa", sub: "Registre o saldo do dia, sincronize totais e feche o caixa." },
+  fornecedores:    { title: "Fornecedores",       sub: "Cadastre e gerencie seus fornecedores de produtos." },
   produtos:  { title: "Produtos",               sub: "Gerencie o catalogo de produtos." },
   secoes:    { title: "Secoes do carrossel",    sub: "Crie, renomeie e reordene secoes da pagina inicial." },
   banners:   { title: "Banners",                sub: "Imagens do carrossel principal (1200 x 400 px)." },
 };
 
+// ─── Dashboard do Colaborador ─────────────────────────────────────────────────
+function ColaboradorDashboard({ userRole, email }: { userRole: UserRole; email: string }) {
+  const ICON_POR_ABA: Record<string, LucideIcon> = {
+    pdv:           ShoppingCart,
+    pedidos:       ShoppingBag,
+    clientes:      Users,
+    caixa:         Landmark,
+    "fluxo-caixa": Wallet,
+    estoque:       Boxes,
+  };
+
+  const abasDisponiveis = ABAS_COLABORADOR.filter(a => userRole.permissoes.includes(a.id));
+
+  // "inicio" é sempre a tela inicial; as demais são as abas liberadas
+  const [activeTab, setActiveTab] = useState("inicio");
+
+  // ── Dados do dashboard de início ──────────────────────────────────────────
+  const [orders,      setOrders]      = useState<Order[]>([]);
+  const [loadingDash, setLoadingDash] = useState(false);
+  const dashLoaded = useRef(false);
+
+  useEffect(() => {
+    if (activeTab !== "inicio" || dashLoaded.current) return;
+    setLoadingDash(true);
+    fetchAllOrders()
+      .then(data => { setOrders(data); dashLoaded.current = true; })
+      .catch(() => {})
+      .finally(() => setLoadingDash(false));
+  }, [activeTab]);
+
+  // Métricas calculadas
+  const hoje        = new Date();
+  const inicioHoje  = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+  const inicioMes   = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+
+  const pedidosHoje = orders.filter(o => new Date(o.created_at) >= inicioHoje);
+  const pedidosMes  = orders.filter(o => new Date(o.created_at) >= inicioMes && o.status !== "cancelled");
+  const pendentes   = orders.filter(o => o.status === "pending");
+  const receitaHoje = pedidosHoje.filter(o => o.status !== "cancelled").reduce((s, o) => s + Number(o.total), 0);
+  const receitaMes  = pedidosMes.reduce((s, o) => s + Number(o.total), 0);
+  const recentOrders = [...orders].slice(0, 6);
+
+  const heading = PAGE_TITLES[activeTab] ?? { title: "", sub: "" };
+
+  // ── Tela inicial (dashboard de informações) ────────────────────────────────
+  function InicioTab() {
+    if (loadingDash) {
+      return (
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="bg-background rounded-xl border border-border p-5 space-y-3">
+                <div className="h-8 w-8 bg-muted animate-pulse rounded-lg" />
+                <div className="h-7 bg-muted animate-pulse rounded w-24" />
+                <div className="h-3 bg-muted animate-pulse rounded w-32" />
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    const metrics = [
+      {
+        label: "Pedidos hoje",
+        value: String(pedidosHoje.length),
+        sub:   `${pedidosMes.length} no mês`,
+        icon:  ShoppingBag,
+        color: "text-blue-600",
+        bg:    "bg-blue-50",
+      },
+      {
+        label: "Receita hoje",
+        value: fmt(receitaHoje),
+        sub:   "••••• no mês",
+        icon:  TrendingUp,
+        color: "text-green-600",
+        bg:    "bg-green-50",
+      },
+      {
+        label: "Aguardando pagto.",
+        value: String(pendentes.length),
+        sub:   pendentes.length > 0 ? "Requerem atenção" : "Tudo em dia",
+        icon:  AlertCircle,
+        color: pendentes.length > 0 ? "text-amber-600" : "text-gray-400",
+        bg:    pendentes.length > 0 ? "bg-amber-50"    : "bg-gray-50",
+      },
+      {
+        label: "Total de pedidos",
+        value: String(orders.length),
+        sub:   "Desde o início",
+        icon:  BarChart2,
+        color: "text-purple-600",
+        bg:    "bg-purple-50",
+      },
+    ];
+
+    return (
+      <div className="space-y-6">
+
+        {/* Cards de métricas */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {metrics.map(m => {
+            const Icon = m.icon;
+            return (
+              <div key={m.label} className="bg-background rounded-xl border border-border p-5">
+                <div className={`inline-flex items-center justify-center w-9 h-9 rounded-lg ${m.bg} mb-3`}>
+                  <Icon className={`h-4 w-4 ${m.color}`} />
+                </div>
+                <p className="text-2xl font-bold text-foreground leading-tight">{m.value}</p>
+                <p className="text-xs text-muted-foreground mt-1">{m.label}</p>
+                <p className="text-[11px] text-muted-foreground/70 mt-0.5">{m.sub}</p>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="grid lg:grid-cols-3 gap-6">
+
+          {/* Últimos pedidos */}
+          <div className="lg:col-span-2 bg-background rounded-xl border border-border overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <h3 className="font-semibold text-sm">Últimos pedidos</h3>
+              {abasDisponiveis.some(a => a.id === "pedidos") && (
+                <button
+                  onClick={() => setActiveTab("pedidos")}
+                  className="text-xs text-primary hover:underline"
+                >
+                  Ver todos
+                </button>
+              )}
+            </div>
+            {recentOrders.length === 0 ? (
+              <div className="p-8 text-center text-sm text-muted-foreground">Nenhum pedido ainda.</div>
+            ) : (
+              <div className="divide-y divide-border">
+                {recentOrders.map(o => (
+                  <div key={o.id} className="flex items-center justify-between px-5 py-3 gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">{o.customer_name ?? "—"}</p>
+                      <p className="text-xs text-muted-foreground">{fmtDateTime(o.created_at)}</p>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <Badge
+                        variant="secondary"
+                        className={`text-[10px] ${STATUS_COLOR[o.status]}`}
+                      >
+                        <StatusIcon status={o.status} />
+                        <span className="ml-1">{STATUS_LABEL[o.status]}</span>
+                      </Badge>
+                      <span className="text-sm font-semibold">{fmt(Number(o.total))}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Acesso rápido */}
+          <div className="bg-background rounded-xl border border-border overflow-hidden">
+            <div className="px-5 py-4 border-b border-border">
+              <h3 className="font-semibold text-sm">Acesso rápido</h3>
+            </div>
+            {abasDisponiveis.length === 0 ? (
+              <div className="p-6 text-center text-sm text-muted-foreground">
+                Nenhuma aba liberada pelo administrador.
+              </div>
+            ) : (
+              <div className="p-3 space-y-1">
+                {abasDisponiveis.map(aba => {
+                  const Icon = ICON_POR_ABA[aba.id] ?? Package;
+                  return (
+                    <button
+                      key={aba.id}
+                      onClick={() => setActiveTab(aba.id)}
+                      className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-secondary transition-colors text-left group"
+                    >
+                      <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary/10 group-hover:bg-primary/20 transition-colors">
+                        <Icon className="h-4 w-4 text-primary" />
+                      </div>
+                      <span className="text-sm font-medium">{aba.label}</span>
+                      <ChevronRight className="h-4 w-4 text-muted-foreground ml-auto" />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+        </div>
+      </div>
+    );
+  }
+
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Todos os itens de navegação (início + abas liberadas)
+  const navItems = [
+    { id: "inicio", label: "Início", icon: BarChart2 },
+    ...abasDisponiveis.map(a => ({ id: a.id, label: a.label, icon: ICON_POR_ABA[a.id] ?? Package })),
+  ];
+
+  function SidebarNav() {
+    return (
+      <nav className="p-3 space-y-1">
+        <div className="px-3 pb-2">
+          <div className="flex items-center gap-2 py-2 px-1 bg-primary/10 rounded-lg px-3">
+            <ShieldAlert className="h-3.5 w-3.5 text-primary shrink-0" />
+            <span className="text-xs font-medium text-primary">Acesso colaborador</span>
+          </div>
+        </div>
+        {navItems.map(item => {
+          const Icon     = item.icon;
+          const isActive = activeTab === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => { setActiveTab(item.id); setSidebarOpen(false); }}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors text-left ${
+                isActive
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+              }`}
+            >
+              <Icon className="h-4 w-4 shrink-0" />
+              {item.label}
+            </button>
+          );
+        })}
+      </nav>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-secondary flex flex-col">
+
+      {/* ── Header ──────────────────────────────────────────────────── */}
+      <header className="bg-background border-b border-border sticky top-0 z-20">
+        <div className="flex items-center justify-between px-4 py-3 gap-3">
+          <div className="flex items-center gap-3">
+            <button
+              className="lg:hidden p-1.5 rounded-lg hover:bg-secondary transition-colors"
+              onClick={() => setSidebarOpen(o => !o)}
+              aria-label="Menu"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <Heart className="h-6 w-6 text-primary" fill="currentColor" />
+              <span className="text-lg font-extrabold text-primary tracking-tight">{STORE_NAME}</span>
+              <Badge variant="secondary" className="ml-1 hidden sm:inline-flex">Colaborador</Badge>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground hidden sm:inline truncate max-w-[180px]">{email}</span>
+            <Button variant="ghost" size="sm" onClick={() => supabase.auth.signOut()} className="gap-1.5">
+              <LogOut className="h-4 w-4" />
+              <span className="hidden sm:inline">Sair</span>
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      <div className="flex flex-1 min-h-0">
+
+        {/* ── Sidebar desktop ─────────────────────────────────────────── */}
+        <aside className="hidden lg:block w-52 shrink-0 bg-background border-r border-border sticky top-[57px] self-start h-[calc(100vh-57px)] overflow-y-auto">
+          <SidebarNav />
+        </aside>
+
+        {/* ── Sidebar mobile overlay ──────────────────────────────────── */}
+        {sidebarOpen && (
+          <>
+            <div
+              className="fixed inset-0 bg-black/40 z-30 lg:hidden"
+              onClick={() => setSidebarOpen(false)}
+            />
+            <aside className="fixed left-0 top-[57px] bottom-0 w-52 bg-background border-r border-border z-40 overflow-y-auto lg:hidden">
+              <SidebarNav />
+            </aside>
+          </>
+        )}
+
+        {/* ── Conteúdo principal ─────────────────────────────────────── */}
+        <main className="flex-1 min-w-0 p-4 md:p-6 overflow-x-hidden">
+          {activeTab !== "inicio" && heading.title && (
+            <div className="mb-6">
+              <h2 className="text-xl font-bold">{heading.title}</h2>
+              <p className="text-sm text-muted-foreground">{heading.sub}</p>
+            </div>
+          )}
+
+          {activeTab === "inicio"      && <InicioTab />}
+          {activeTab === "pdv"         && <PDVTab         isActive />}
+          {activeTab === "pedidos"     && <AdminOrdersTab isActive isAdmin={false} />}
+          {activeTab === "clientes"    && <ClientesTab    isActive />}
+          {activeTab === "caixa"       && <CaixaTab       isActive />}
+          {activeTab === "fluxo-caixa" && <FluxoCaixaTab  isActive />}
+          {activeTab === "estoque"     && <EstoqueTab     isActive isAdmin={false} />}
+        </main>
+
+      </div>
+    </div>
+  );
+}
+
 // ─── Dashboard principal ──────────────────────────────────────────────────────
-function AdminDashboard() {
+function AdminDashboard({ userRole }: { userRole: UserRole | null }) {
   const [activeTab,    setActiveTab]    = useState("dashboard");
   const [sidebarOpen,  setSidebarOpen]  = useState(false);
+
+  // null = sem registro no banco = admin original (retrocompat)
+  const isAdmin      = !userRole || userRole.role === "admin";
+  const permissoesSet = new Set(userRole?.permissoes ?? []);
+
+  // Abas visíveis para este usuário
+  const navGroupsFiltrados = NAV_GROUPS
+    .map(group => ({
+      ...group,
+      items: group.items.filter(item =>
+        isAdmin || permissoesSet.has(item.id)
+      ),
+    }))
+    .filter(group => group.items.length > 0);
+
+  // Se o activeTab não estiver mais disponível, redirecionar para o primeiro disponível
+  const allVisibleIds = navGroupsFiltrados.flatMap(g => g.items.map(i => i.id));
+  useEffect(() => {
+    if (!isAdmin && !allVisibleIds.includes(activeTab)) {
+      setActiveTab(allVisibleIds[0] ?? "pdv");
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin]);
 
   const heading = PAGE_TITLES[activeTab] ?? { title: activeTab, sub: "" };
 
@@ -3967,7 +5948,14 @@ function AdminDashboard() {
   function SidebarNav() {
     return (
       <nav className="p-3 space-y-5">
-        {NAV_GROUPS.map(group => (
+        {/* Badge de papel na sidebar */}
+        {!isAdmin && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 rounded-lg">
+            <ShieldAlert className="h-3.5 w-3.5 text-primary shrink-0" />
+            <span className="text-xs font-medium text-primary">Acesso colaborador</span>
+          </div>
+        )}
+        {navGroupsFiltrados.map(group => (
           <div key={group.label}>
             <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest px-3 mb-1.5">
               {group.label}
@@ -4015,7 +6003,7 @@ function AdminDashboard() {
             </button>
             <div className="flex items-center gap-2 shrink-0">
               <Heart className="h-6 w-6 text-primary" fill="currentColor" />
-              <span className="text-lg font-extrabold text-primary tracking-tight">RB FARMA</span>
+              <span className="text-lg font-extrabold text-primary tracking-tight">{STORE_NAME}</span>
               <Badge variant="secondary" className="ml-1 hidden sm:inline-flex">Admin</Badge>
             </div>
           </div>
@@ -4062,20 +6050,23 @@ function AdminDashboard() {
           </div>
 
           {activeTab === "dashboard" && <DashboardTab   isActive={activeTab === "dashboard"} />}
-          {activeTab === "pedidos"   && <AdminOrdersTab isActive={activeTab === "pedidos"}   />}
+          {activeTab === "pedidos"   && <AdminOrdersTab isActive={activeTab === "pedidos"}   isAdmin={isAdmin} />}
           {activeTab === "pdv"       && <PDVTab         isActive={activeTab === "pdv"}       />}
           {activeTab === "clientes"  && <ClientesTab    isActive={activeTab === "clientes"}  />}
           {activeTab === "produtos"  && <ProductsTab    isActive={activeTab === "produtos"}  />}
           {activeTab === "secoes"    && <SectionsTab    isActive={activeTab === "secoes"}    />}
           {activeTab === "banners"      && <BannersTab      isActive={activeTab === "banners"}      />}
           {activeTab === "fluxo-caixa"   && <FluxoCaixaTab     isActive={activeTab === "fluxo-caixa"}   />}
-          {activeTab === "colaboradores" && <ColaboradoresTab  isActive={activeTab === "colaboradores"} />}
-          {activeTab === "estoque"       && <EstoqueTab        isActive={activeTab === "estoque"}       />}
+          {activeTab === "colaboradores" && <ColaboradoresTab  isActive={activeTab === "colaboradores"} isAdmin={isAdmin} />}
+          {activeTab === "estoque"       && <EstoqueTab        isActive={activeTab === "estoque"}       isAdmin={isAdmin} />}
           {activeTab === "relatorios"    && <RelatoriosTab     isActive={activeTab === "relatorios"}    />}
           {activeTab === "metas"         && <MetasTab          isActive={activeTab === "metas"}         />}
           {activeTab === "cupons"        && <CuponsTab         isActive={activeTab === "cupons"}        />}
           {activeTab === "contas"        && <ContasTab         isActive={activeTab === "contas"}        />}
           {activeTab === "comissoes"     && <ComissoesTab      isActive={activeTab === "comissoes"}     />}
+          {activeTab === "configuracoes" && <ConfigTab         isActive={activeTab === "configuracoes"} />}
+          {activeTab === "caixa"         && <CaixaTab          isActive={activeTab === "caixa"}         />}
+          {activeTab === "fornecedores"  && <FornecedoresTab   isActive={activeTab === "fornecedores"}  />}
         </main>
       </div>
     </div>
@@ -4084,7 +6075,8 @@ function AdminDashboard() {
 
 // ─── Pagina principal ─────────────────────────────────────────────────────────
 export default function Admin() {
-  const [session, setSession] = useState<Session | null | undefined>(undefined);
+  const [session,  setSession]  = useState<Session | null | undefined>(undefined);
+  const [userRole, setUserRole] = useState<UserRole | null | undefined>(undefined);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -4092,12 +6084,35 @@ export default function Admin() {
     return () => subscription.unsubscribe();
   }, []);
 
-  if (session === undefined) return (
+  // Buscar papel do usuário sempre que a sessão mudar
+  useEffect(() => {
+    if (!session) { setUserRole(undefined); return; }
+    fetchUserRole(session.user.id)
+      .then(role => {
+        // Conta revogada → forçar logout
+        if (role && !role.ativo) {
+          supabase.auth.signOut();
+          return;
+        }
+        setUserRole(role); // null = sem registro = admin original
+      })
+      .catch(() => setUserRole(null)); // erro na tabela (ainda não migrou) = admin
+  }, [session]);
+
+  if (session === undefined || (session && userRole === undefined)) return (
     <div className="min-h-screen flex items-center justify-center bg-secondary">
       <div className="text-muted-foreground text-sm">Carregando...</div>
     </div>
   );
 
   if (!session) return <LoginForm />;
-  return <AdminDashboard />;
+
+  const role = userRole ?? null;
+
+  // Colaborador → dashboard simplificado
+  if (role?.role === "colaborador") {
+    return <ColaboradorDashboard userRole={role} email={session.user.email ?? ""} />;
+  }
+
+  return <AdminDashboard userRole={role} />;
 }

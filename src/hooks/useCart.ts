@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { CartItem, Product } from "@/types";
+import { CART_STORAGE_KEY } from "@/config/storeConfig";
 
 interface CartStore {
   items: CartItem[];
@@ -21,6 +22,8 @@ export const useCart = create<CartStore>()(
         set((state) => {
           const existing = state.items.find((i) => i.id === product.id);
           if (existing) {
+            const maxStock = existing.stock ?? Infinity;
+            if (existing.cartQuantity >= maxStock) return state; // já no limite
             return {
               items: state.items.map((i) =>
                 i.id === product.id
@@ -37,9 +40,12 @@ export const useCart = create<CartStore>()(
 
       increaseQty: (id) =>
         set((state) => ({
-          items: state.items.map((i) =>
-            i.id === id ? { ...i, cartQuantity: i.cartQuantity + 1 } : i
-          ),
+          items: state.items.map((i) => {
+            if (i.id !== id) return i;
+            const maxStock = i.stock ?? Infinity;
+            if (i.cartQuantity >= maxStock) return i; // já no limite
+            return { ...i, cartQuantity: i.cartQuantity + 1 };
+          }),
         })),
 
       decreaseQty: (id) =>
@@ -64,7 +70,7 @@ export const useCart = create<CartStore>()(
 
       clearCart: () => set({ items: [] }),
     }),
-    { name: "rbfarma-cart" } // persiste no localStorage
+    { name: CART_STORAGE_KEY } // persiste no localStorage
   )
 );
 

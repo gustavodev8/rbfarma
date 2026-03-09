@@ -4,6 +4,7 @@ import type { Order } from "./ordersService";
 import type { EntradaFluxo } from "./fluxoCaixaService";
 import type { Conta } from "./contasService";
 import type { Colaborador } from "./colaboradoresService";
+import { STORE_NAME, STORE_SLUG } from "@/config/storeConfig";
 
 // ─── Tipos públicos ────────────────────────────────────────────────────────────
 export interface PDFSecoes {
@@ -112,7 +113,7 @@ export function gerarRelatorioPDF(config: PDFConfig): void {
   doc.setTextColor(...WHITE);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(16);
-  doc.text("RB FARMA", 14, 14);
+  doc.text(STORE_NAME, 14, 14);
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
@@ -351,10 +352,10 @@ export function gerarRelatorioPDF(config: PDFConfig): void {
     doc.setFontSize(7);
     doc.setTextColor(...SLATE);
     doc.text(`Pagina ${i} de ${total}`, w / 2, ph - 7, { align: "center" });
-    doc.text("RB FARMA — Relatorio gerado automaticamente", 14, ph - 7);
+    doc.text(`${STORE_NAME} — Relatorio gerado automaticamente`, 14, ph - 7);
   }
 
   // ── Download ────────────────────────────────────────────────────────────────
   const dateStr = new Date().toISOString().slice(0, 10);
-  doc.save(`rbfarma-relatorio-${dateStr}.pdf`);
+  doc.save(`${STORE_SLUG}-relatorio-${dateStr}.pdf`);
 }

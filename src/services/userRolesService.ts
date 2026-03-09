@@ -1,0 +1,141 @@
+import { supabase } from "./supabaseClient";
+import { restPatch } from "./supabaseRest";
+
+// ── Tipos ─────────────────────────────────────────────────────────────────────
+
+export interface UserRole {
+  id:             string;
+  user_id:        string;
+  role:           "admin" | "colaborador";
+  colaborador_id: string | null;
+  permissoes:     string[];   // IDs das abas que o colaborador pode acessar
+  ativo:          boolean;
+  created_at:     string;
+  updated_at:     string;
+}
+
+// Abas que podem ser liberadas para colaboradores (admin vê tudo)
+export const ABAS_COLABORADOR: { id: string; label: string; grupo: string }[] = [
+  { id: "pdv",         label: "Nova Venda (PDV)",    grupo: "Atendimento" },
+  { id: "pedidos",     label: "Pedidos",             grupo: "Atendimento" },
+  { id: "clientes",    label: "Clientes",            grupo: "Atendimento" },
+  { id: "caixa",       label: "Fechamento de Caixa", grupo: "Financeiro"  },
+  { id: "fluxo-caixa", label: "Fluxo de Caixa",      grupo: "Financeiro"  },
+  { id: "estoque",     label: "Estoque",             grupo: "Catálogo"    },
+];
+
+// ── Buscar papel do usuário logado ────────────────────────────────────────────
+
+export async function fetchUserRole(userId: string): Promise<UserRole | null> {
+  const { data, error } = await supabase
+    .from("user_roles")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    // 42P01 = tabela não existe (migração não rodada) → tratar como admin
+    if (error.code === "42P01" || error.message.includes("does not exist")) return null;
+    throw error;
+  }
+  return data as UserRole | null;
+}
+
+// ── Buscar acesso de um colaborador específico ────────────────────────────────
+
+export async function fetchColaboradorAcesso(
+  colaboradorId: string,
+): Promise<UserRole | null> {
+  const { data, error } = await supabase
+    .from("user_roles")
+    .select("*")
+    .eq("colaborador_id", colaboradorId)
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === "42P01" || error.message.includes("does not exist")) return null;
+    throw error;
+  }
+  return data as UserRole | null;
+}
+
+// ── Atualizar permissões (abas) ───────────────────────────────────────────────
+
+export async function updatePermissoes(
+  userId: string,
+  permissoes: string[],
+): Promise<void> {
+  await restPatch(
+    "user_roles",
+    { column: "user_id", value: userId },
+    { permissoes, updated_at: new Date().toISOString() },
+  );
+}
+
+// ── Ativar / revogar acesso ───────────────────────────────────────────────────
+
+export async function toggleAcesso(userId: string, ativo: boolean): Promise<void> {
+  await restPatch(
+    "user_roles",
+    { column: "user_id", value: userId },
+    { ativo, updated_at: new Date().toISOString() },
+  );
+}
+
+// ── Funções que chamam a Edge Function (operações que precisam de service role)
+
+const EDGE_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/manage-colaborador-user`;
+
+async function callEdge(body: object): Promise<Record<string, unknown>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  const token   = session?.access_token ?? "";
+  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+
+  const res = await fetch(EDGE_URL, {
+    method:  "POST",
+    headers: {
+      "Content-Type":  "application/json",
+      "apikey":        anonKey,          // obrigatório para o gateway do Supabase
+      "Authorization": `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  // "failed to fetch" geralmente = função não deployada ou URL errada
+  const json = await res.json() as Record<string, unknown>;
+  if (!res.ok) throw new Error((json.error as string) ?? `Erro ${res.status}`);
+  return json;
+}
+
+// ── Criar conta de colaborador ────────────────────────────────────────────────
+
+export async function createColaboradorUser(input: {
+  email:          string;
+  password:       string;
+  colaborador_id: string;
+  permissoes:     string[];
+}): Promise<string> {
+  const result = await callEdge({ action: "create", ...input });
+  return result.user_id as string;
+}
+
+// ── Alterar senha ─────────────────────────────────────────────────────────────
+
+export async function updatePassword(userId: string, password: string): Promise<void> {
+  await callEdge({ action: "update_password", user_id: userId, password });
+}
+
+// ── Deletar conta do colaborador (remove do Auth + cascade em user_roles) ─────
+
+export async function deleteColaboradorUser(userId: string): Promise<void> {
+  await callEdge({ action: "delete", user_id: userId });
+}
+
+// ── Gerar senha aleatória segura ──────────────────────────────────────────────
+
+export function gerarSenhaAleatoria(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$";
+  return Array.from({ length: 12 }, () =>
+    chars[Math.floor(Math.random() * chars.length)]
+  ).join("");
+}

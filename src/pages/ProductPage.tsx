@@ -8,6 +8,7 @@ import { useCart } from "@/hooks/useCart";
 import { isSupabaseConfigured } from "@/services/supabaseClient";
 import { fetchProductById } from "@/services/productsService";
 import { allProducts } from "@/data/products";
+import { STORE_NAME } from "@/config/storeConfig";
 import type { Product } from "@/types";
 
 const fmt = (v: number) =>
@@ -169,7 +170,7 @@ export default function ProductPage() {
 
             {/* Código */}
             <p className="text-xs text-gray-400">
-              Vendido por <span className="text-[#e8001c] font-semibold">RB FARMA</span>
+              Vendido por <span className="text-[#e8001c] font-semibold">{STORE_NAME}</span>
               &nbsp;·&nbsp; Qtd: {product.quantity}
             </p>
 

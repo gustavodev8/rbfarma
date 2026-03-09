@@ -1,0 +1,261 @@
+================================================================
+CONTEXTO DO PROJETO — LEIA ANTES DE QUALQUER COISA
+================================================================
+
+NOME INTERNO: rbfarma (mas é white-label — o nome muda por cliente)
+TIPO: Sistema de gestão + loja virtual para microempreendedores
+MODELO: White-label — um único código, múltiplos clientes com .env diferente
+
+
+----------------------------------------------------------------
+O QUE É ESSE PROJETO
+----------------------------------------------------------------
+É um sistema completo de gestão comercial voltado para pequenos
+negócios (farmácias, mercearias, papelarias, pet shops, etc).
+O dono da loja acessa um painel admin para gerenciar tudo.
+Os clientes acessam uma loja virtual para comprar online.
+
+É white-label porque toda identidade da loja (nome, CNPJ, slogan,
+cidade) vem do arquivo .env — o código nunca precisa ser alterado
+para um novo cliente. Basta trocar o .env e o banco Supabase.
+
+
+----------------------------------------------------------------
+STACK TÉCNICA
+----------------------------------------------------------------
+Frontend : React 18 + TypeScript + Vite
+Estilo   : Tailwind CSS + shadcn/ui (componentes)
+Backend  : Supabase (PostgreSQL + Auth + Storage + Edge Functions)
+Deploy   : Qualquer hospedagem estática (Vercel, Netlify, etc)
+Runtime  : Edge Functions em Deno (Supabase)
+Ícones   : lucide-react
+
+
+----------------------------------------------------------------
+ARQUIVOS DE CONFIGURAÇÃO PRINCIPAIS
+----------------------------------------------------------------
+.env                          → credenciais Supabase + dados da loja (NÃO commitado)
+src/config/storeConfig.ts     → lê as variáveis do .env e exporta constantes
+src/services/supabaseClient.ts → singleton do cliente Supabase
+src/services/supabaseRest.ts  → helpers restGet/restPost/restPatch/restDelete
+                                 usados em vez do SDK JS em rotas críticas
+vite.config.ts                → configuração do bundler
+tailwind.config.ts            → cores/temas customizáveis por cliente
+
+
+----------------------------------------------------------------
+VARIÁVEIS DO .env
+----------------------------------------------------------------
+VITE_SUPABASE_URL             URL do projeto Supabase
+VITE_SUPABASE_ANON_KEY        Chave pública do Supabase
+VITE_STORE_NAME               Nome da loja exibido na interface
+VITE_STORE_SLOGAN             Slogan no rodapé do recibo
+VITE_STORE_SLUG               Identificador curto sem espaços (usado no localStorage)
+VITE_STORE_CNPJ               CNPJ formatado
+VITE_STORE_LEGAL              Razão social completa
+VITE_STORE_CITY               Cidade em maiúsculas para PIX (ex: SAO PAULO)
+
+
+----------------------------------------------------------------
+ESTRUTURA DE PÁGINAS / ROTAS
+----------------------------------------------------------------
+/          → Loja virtual (homepage com carrossel, produtos, seções)
+/produto/:id → Página do produto
+/carrinho  → Carrinho de compras
+/checkout  → Finalizar pedido
+/pedidos   → Acompanhamento de pedidos do cliente
+/admin     → Painel administrativo (login + dashboard)
+
+
+----------------------------------------------------------------
+PAINEL ADMIN — src/pages/Admin.tsx
+----------------------------------------------------------------
+Arquivo principal do sistema. É grande (~6000 linhas) e contém
+TODOS os componentes do admin em um único arquivo por escolha
+arquitetural (facilita manutenção em contexto único).
+
+Componentes dentro do Admin.tsx:
+  LoginForm             → tela de login (admin e colaborador usam a mesma)
+  Admin()               → componente raiz — detecta sessão e papel do usuário
+  AdminDashboard        → painel completo do admin (sidebar + abas)
+  ColaboradorDashboard  → painel simplificado para colaboradores (sidebar + inicio com métricas)
+
+Abas do admin (sidebar):
+  dashboard      → métricas gerais (receita, pedidos, estoque baixo, metas)
+  pedidos        → gestão de pedidos com filtros e atualização de status
+  pdv            → ponto de venda presencial (caixa registradora)
+  clientes       → perfis de clientes cadastrados
+  caixa          → fechamento de caixa diário
+  fluxo-caixa    → entradas e saídas financeiras
+  contas         → contas a pagar e receber
+  metas          → metas mensais de faturamento e pedidos
+  relatorios     → relatórios por período em PDF
+  comissoes      → cálculo de comissão por colaborador
+  colaboradores  → cadastro de equipe + gestão de acesso ao sistema
+  cupons         → cupons de desconto
+  configuracoes  → taxa de cartão, parcelas
+  estoque        → controle de estoque com alertas
+  fornecedores   → cadastro de fornecedores
+  produtos       → catálogo de produtos
+  secoes         → seções do carrossel da homepage
+  banners        → banners do carrossel principal
+
+
+----------------------------------------------------------------
+SISTEMA DE COLABORADORES (ACESSO AO SISTEMA)
+----------------------------------------------------------------
+O dono da loja (admin) pode criar logins para colaboradores.
+Cada colaborador tem acesso apenas às abas que o admin liberar.
+
+Como funciona:
+  - Tabela user_roles: guarda role ('admin' | 'colaborador') e permissoes[]
+  - Admin → vê tudo, sem restrição
+  - Colaborador → vê apenas as abas em seu array permissoes[]
+  - Se não tem registro em user_roles → tratado como admin (retrocompat)
+  - Conta desativada (ativo=false) → logout forçado ao logar
+
+Abas liberáveis para colaborador:
+  pdv, pedidos, clientes, caixa, fluxo-caixa, estoque
+
+Criação de conta de colaborador:
+  - Via Edge Function "manage-colaborador-user" (Deno/Supabase)
+  - Actions: create, update_password, delete
+  - Autenticação: JWT decodificado no próprio código (sem verificação de gateway)
+  - Deploy: npx supabase functions deploy manage-colaborador-user --no-verify-jwt
+
+Dashboard do colaborador (ColaboradorDashboard):
+  - Sidebar igual ao admin mas só com as abas liberadas
+  - Aba "Início" sempre visível com métricas: pedidos hoje, receita hoje,
+    pendentes, total. Últimos pedidos + acesso rápido.
+  - Receita do mês aparece como "•••••" (oculta para colaboradores)
+
+
+----------------------------------------------------------------
+BANCO DE DADOS — TABELAS
+----------------------------------------------------------------
+Para replicar, execute MIGRATION_TOTAL.sql no SQL Editor do Supabase.
+Esse arquivo cria tudo em ordem correta com IF NOT EXISTS.
+
+Tabelas (em ordem de dependência):
+  1.  profiles          → perfil do cliente (estende auth.users)
+  2.  products          → catálogo de produtos
+  3.  sections          → seções do carrossel
+  4.  banners           → banners do carrossel
+  5.  orders            → pedidos
+  6.  order_items       → itens dos pedidos
+  7.  colaboradores     → equipe da loja
+  8.  fornecedores      → fornecedores de produtos
+  9.  fluxo_caixa       → lançamentos financeiros (entradas/saídas)
+  10. caixa_fechamentos → fechamento de caixa diário
+  11. metas             → metas mensais
+  12. cupons            → cupons de desconto
+  13. contas            → contas a pagar/receber
+  14. config            → configurações do sistema (taxa cartão, etc)
+  15. user_roles        → papéis e permissões de usuário
+
+Todas as tabelas têm RLS habilitado.
+Leitura pública: products, sections, banners, cupons, config.
+Escrita: apenas usuários autenticados.
+
+
+----------------------------------------------------------------
+SERVIÇOS — src/services/
+----------------------------------------------------------------
+supabaseClient.ts     → singleton Supabase com lock customizado
+supabaseRest.ts       → REST direto (evita travamentos do SDK JS)
+productsService.ts    → CRUD de produtos
+sectionsService.ts    → CRUD de seções
+bannersService.ts     → CRUD + upload de banners
+ordersService.ts      → CRUD de pedidos; ao marcar "delivered" insere
+                         automaticamente em fluxo_caixa como "Venda PDV"
+                         ou "Venda Online"
+fluxoCaixaService.ts  → fetchFluxoCombinado: busca APENAS fluxo_caixa
+                         (NÃO junta com orders para evitar duplicação)
+                         Categorias de venda: "Venda PDV", "Venda Online"
+colaboradoresService.ts → CRUD de colaboradores
+estoqueService.ts     → controle de estoque, alerta de vencimento
+caixaService.ts       → fechamento de caixa diário
+metasService.ts       → metas mensais
+configService.ts      → configurações (taxa cartão, parcelas)
+cuponsService.ts      → CRUD de cupons
+contasService.ts      → contas a pagar/receber
+fornecedoresService.ts → CRUD de fornecedores
+userRolesService.ts   → CRUD de papéis; callEdge() chama Edge Functions
+pdfService.ts         → geração de relatório em PDF
+receiptService.ts     → geração de recibo de venda (PDV)
+shippingService.ts    → cálculo de frete
+paymentService.ts     → lógica de pagamento (PIX, cartão, boleto)
+
+
+----------------------------------------------------------------
+FLUXO DE CAIXA — REGRA IMPORTANTE
+----------------------------------------------------------------
+NUNCA use fetchFluxoCombinado esperando que ele retorne pedidos
+da tabela orders. Ele foi simplificado para ler SOMENTE fluxo_caixa.
+
+Quando um pedido é marcado como "delivered" em ordersService.ts,
+ele automaticamente insere uma linha em fluxo_caixa com:
+  - categoria: "Venda PDV" (se tem vendedor) ou "Venda Online"
+  - valor: total do pedido
+  - data: data atual
+
+No fetchFluxoCombinado, entradas com categoria "Venda PDV" ou
+"Venda Online" recebem source: "order". As demais recebem source: "manual".
+Isso mantém a compatibilidade com o totalVendas no FluxoCaixaTab.
+
+
+----------------------------------------------------------------
+EDGE FUNCTIONS — supabase/functions/
+----------------------------------------------------------------
+manage-colaborador-user/index.ts
+  → Cria/altera/deleta usuários colaboradores no Supabase Auth
+  → Usa service role (supabaseAdmin) para operações privilegiadas
+  → Autenticação: decodifica JWT localmente (sem chamar getUser)
+     porque o gateway pode rejeitar antes. Deploy com --no-verify-jwt
+  → Actions: create | update_password | delete
+
+
+----------------------------------------------------------------
+COMO REPLICAR PARA UM NOVO CLIENTE
+----------------------------------------------------------------
+1. Copiar a pasta do projeto (ou git clone)
+2. npm install
+3. Criar novo projeto no Supabase
+4. Executar MIGRATION_TOTAL.sql no SQL Editor
+5. Criar arquivo .env com credenciais + dados da nova loja
+6. Deploy da Edge Function:
+     npx supabase login
+     npx supabase link --project-ref SEU_REF
+     npx supabase functions deploy manage-colaborador-user --no-verify-jwt
+7. npm run build → deploy do frontend (Vercel/Netlify/etc)
+
+O código NÃO precisa ser alterado. Apenas o .env muda.
+
+
+----------------------------------------------------------------
+PADRÕES DE CÓDIGO USADOS NO PROJETO
+----------------------------------------------------------------
+- Filtros PostgREST: usar parâmetro "and:" com sintaxe
+  and:(campo.eq.valor,campo2.gte.valor2)
+- Sem React Query / Zustand — estado local com useState/useRef
+- Toast de notificação: biblioteca "sonner"
+- Formulários: controlados com useState, sem react-hook-form
+- Datas: manipulação manual sem dayjs/date-fns
+- Valores monetários: toLocaleString("pt-BR", {style:"currency", currency:"BRL"})
+- Ícones: SEMPRE de lucide-react
+
+
+----------------------------------------------------------------
+PROBLEMAS CONHECIDOS / HISTÓRICO
+----------------------------------------------------------------
+- Edge Function 401: deploy sempre com --no-verify-jwt para evitar
+  que o gateway Supabase rejeite o JWT antes do código rodar
+- Fluxo de caixa duplicado: resolvido em mar/2026. ordersService insere
+  em fluxo_caixa ao entregar; fetchFluxoCombinado não busca mais orders.
+- PDV layout: usa h-[calc(100vh-160px)] com colunas independentes
+  para scroll dos produtos sem mover o painel direito (carrinho/pagamento)
+
+
+================================================================
+FIM DO CONTEXTO
+================================================================

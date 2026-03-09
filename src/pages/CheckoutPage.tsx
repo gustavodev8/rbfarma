@@ -3,12 +3,14 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   ChevronRight, User, MapPin, CheckCircle2, Smartphone,
   FileText, Lock, ChevronDown, Loader2, Copy, Check, AlertCircle,
-  ShoppingBag, ArrowRight, X,
+  ShoppingBag, ArrowRight, X, Clock, CreditCard,
 } from "lucide-react";
 import { useCart, cartTotal, cartCount } from "@/hooks/useCart";
 import { useAuth }                       from "@/hooks/useAuth";
 import { createOrder }                   from "@/services/ordersService";
 import { createPayment }                 from "@/services/paymentService";
+import { fetchConfig, calcularParcelas } from "@/services/configService";
+import type { ConfigCartao }             from "@/services/configService";
 import { validateCupom, incrementCupomUso } from "@/services/cuponsService";
 import type { Cupom }                    from "@/services/cuponsService";
 import { calculateShipping, shippingLabel, FREE_SHIPPING_THRESHOLD } from "@/services/shippingService";
@@ -17,7 +19,7 @@ import Header                            from "@/components/Header";
 const fmt = (v: number) =>
   v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 
-type PaymentMethod = "pix" | "boleto";
+type PaymentMethod = "pix" | "boleto" | "credit";
 type Step = "form" | "pix" | "boleto" | "success";
 
 /* ── Masks ─────────────────────────────────────────────────────── */
@@ -98,7 +100,7 @@ function PixScreen({
   }, []);
 
   const qrSrc = pixQrCodeUrl
-    || `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(pixCode)}&bgcolor=ffffff&margin=10`;
+    || `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(pixCode)}&bgcolor=ffffff&margin=12`;
 
   const steps = [
     "Abra o app do seu banco ou carteira digital",
@@ -108,112 +110,106 @@ function PixScreen({
   ];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-green-50 to-emerald-50">
+    <div className="min-h-screen bg-gray-50">
       <Header />
-      <div className="container mx-auto px-4 py-8 max-w-md">
+      <div className="container mx-auto px-4 py-8 max-w-3xl">
 
-        {/* Card principal */}
-        <div className="bg-white rounded-3xl shadow-lg overflow-hidden">
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+          {/* ── Layout: coluna única no mobile, 2 colunas no desktop ── */}
+          <div className="flex flex-col lg:flex-row">
 
-          {/* Header verde */}
-          <div className="bg-gradient-to-r from-green-500 to-emerald-500 px-6 pt-8 pb-10 text-white text-center relative">
-            <div className="w-14 h-14 bg-white/20 rounded-2xl flex items-center justify-center mx-auto mb-3">
-              <Smartphone className="h-7 w-7 text-white" />
-            </div>
-            <h1 className="text-2xl font-extrabold">Pagar com PIX</h1>
-            <p className="text-green-100 text-sm mt-1">Pedido #{orderNumber}</p>
-            {/* Valor em destaque */}
-            <div className="mt-4 inline-flex items-baseline gap-1">
-              <span className="text-green-200 text-sm font-medium">R$</span>
-              <span className="text-4xl font-extrabold tabular-nums">
-                {(total).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              </span>
-            </div>
-            {/* Onda decorativa */}
-            <div className="absolute -bottom-px left-0 right-0 h-6 bg-white" style={{clipPath:"ellipse(55% 100% at 50% 100%)"}} />
-          </div>
+            {/* ── COLUNA ESQUERDA: QR + código ── */}
+            <div className="flex flex-col items-center justify-center gap-5 p-8 lg:w-[340px] lg:shrink-0 lg:border-r lg:border-gray-100">
 
-          <div className="px-6 pb-8 pt-4 flex flex-col items-center gap-5">
+              {/* Cabeçalho compacto */}
+              <div className="text-center">
+                <div className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-green-50 mb-3">
+                  <Smartphone className="h-5 w-5 text-green-600" />
+                </div>
+                <h1 className="text-lg font-bold text-gray-900">Pagar com PIX</h1>
+                <p className="text-sm text-gray-400 mt-0.5">Pedido #{orderNumber}</p>
+              </div>
 
-            {/* Timer */}
-            <div className={`flex items-center gap-2 text-sm px-4 py-2 rounded-full font-semibold
-              ${timer < 120 ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
-              <span>⏱ Código válido por</span>
-              <PixTimer seconds={timer} />
-            </div>
+              {/* Valor */}
+              <div className="text-center">
+                <p className="text-xs text-gray-400 mb-0.5">Valor a pagar</p>
+                <p className="text-3xl font-extrabold text-gray-900 tabular-nums">
+                  {total.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}
+                </p>
+              </div>
 
-            {/* QR Code */}
-            <div className="relative">
-              <div className="bg-white rounded-2xl p-4 shadow-md border border-gray-100">
+              {/* Timer */}
+              <div className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full font-semibold
+                ${timer < 120 ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}>
+                <Clock className="h-3.5 w-3.5 shrink-0" />
+                Código válido por <PixTimer seconds={timer} />
+              </div>
+
+              {/* QR Code */}
+              <div className="bg-white rounded-xl p-3 border border-gray-200 shadow-sm">
                 <img
                   src={qrSrc}
                   alt="QR Code PIX"
-                  className="w-52 h-52 rounded-xl"
+                  className="w-48 h-48 rounded-lg"
                   onError={(e) => { (e.target as HTMLImageElement).src =
-                    `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(pixCode || "RBFARMA")}&bgcolor=ffffff&margin=10`; }}
+                    `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(pixCode || "RBFARMA")}&bgcolor=ffffff&margin=12`; }}
                 />
               </div>
-              {/* Badge scan */}
-              <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 bg-green-500 text-white text-[11px] font-bold px-3 py-1 rounded-full shadow whitespace-nowrap">
-                ESCANEIE AQUI
+
+              {/* Copia e cola */}
+              <div className="w-full">
+                <p className="text-[11px] text-gray-400 text-center mb-1.5">ou use o código copia e cola</p>
+                <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl p-3">
+                  <p className="flex-1 text-[10px] text-gray-500 font-mono break-all leading-relaxed select-all">
+                    {pixCode}
+                  </p>
+                  <CopyButton text={pixCode} />
+                </div>
               </div>
             </div>
 
-            {/* Separador */}
-            <div className="flex items-center gap-3 w-full mt-1">
-              <div className="flex-1 h-px bg-gray-100" />
-              <span className="text-xs text-gray-400 font-medium">ou use o código abaixo</span>
-              <div className="flex-1 h-px bg-gray-100" />
-            </div>
+            {/* ── COLUNA DIREITA: instruções + status ── */}
+            <div className="flex flex-col justify-between gap-6 p-8 flex-1 bg-gray-50/50">
 
-            {/* Copia e cola */}
-            <div className="w-full">
-              <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-2xl p-3.5">
-                <p className="flex-1 text-[11px] text-gray-500 font-mono break-all leading-relaxed select-all">
-                  {pixCode}
+              {/* Como pagar */}
+              <div>
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-4">Como pagar</p>
+                <ol className="space-y-4">
+                  {steps.map((s, i) => (
+                    <li key={i} className="flex items-start gap-3">
+                      <span className="w-6 h-6 rounded-full bg-green-500 text-white text-[11px] font-bold
+                        flex items-center justify-center shrink-0 mt-0.5">
+                        {i + 1}
+                      </span>
+                      <span className="text-sm text-gray-600 leading-relaxed">{s}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+
+              {/* Status + ações */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2.5 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200
+                  rounded-xl px-4 py-3 font-medium">
+                  <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+                  Aguardando confirmação do pagamento...
+                </div>
+
+                <button
+                  onClick={onSuccess}
+                  className="w-full text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
+                >
+                  Já paguei — ver confirmação do pedido
+                </button>
+
+                <p className="text-center text-[11px] text-gray-400 flex items-center justify-center gap-1">
+                  <Lock className="h-3 w-3" /> Pagamento seguro via Banco Central do Brasil
                 </p>
-                <CopyButton text={pixCode} />
               </div>
             </div>
-
-            {/* Instruções */}
-            <div className="w-full bg-green-50 rounded-2xl p-4">
-              <p className="text-xs font-bold text-green-800 mb-3">Como pagar:</p>
-              <ol className="space-y-2.5">
-                {steps.map((s, i) => (
-                  <li key={i} className="flex items-start gap-2.5">
-                    <span className="w-5 h-5 rounded-full bg-green-500 text-white text-[10px] font-extrabold
-                      flex items-center justify-center shrink-0 mt-0.5">
-                      {i + 1}
-                    </span>
-                    <span className="text-xs text-green-800 leading-relaxed">{s}</span>
-                  </li>
-                ))}
-              </ol>
-            </div>
-
-            {/* Aguardando */}
-            <div className="flex items-center gap-2.5 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200
-              rounded-2xl px-5 py-3.5 w-full justify-center font-medium">
-              <Loader2 className="h-4 w-4 animate-spin shrink-0" />
-              Aguardando confirmação de pagamento...
-            </div>
-
-            {/* Link confirmar manualmente */}
-            <button
-              onClick={onSuccess}
-              className="text-xs text-gray-400 hover:text-gray-600 transition-colors underline underline-offset-2"
-            >
-              Já paguei, ver confirmação do pedido
-            </button>
 
           </div>
         </div>
-
-        {/* Segurança */}
-        <p className="text-center text-xs text-gray-400 mt-4 flex items-center justify-center gap-1.5">
-          <Lock className="h-3 w-3" /> Pagamento 100% seguro via Banco Central do Brasil
-        </p>
 
       </div>
     </div>
@@ -406,9 +402,14 @@ export default function CheckoutPage() {
   const [cupomDesconto,setCupomDesconto]= useState(0);
   const [cupomLoading, setCupomLoading] = useState(false);
   const [cupomError,   setCupomError]   = useState("");
+  const [parcelas,     setParcelas]     = useState(1);
+  const [cfgCartao,    setCfgCartao]    = useState<ConfigCartao>({ taxa_pct: 2.5, parcelas_max: 6, juros_a_partir_de: 2 });
 
-  // Scroll ao topo na montagem
-  useEffect(() => { window.scrollTo(0, 0); }, []);
+  // Scroll ao topo + carrega config de cartão
+  useEffect(() => {
+    window.scrollTo(0, 0);
+    fetchConfig().then(c => setCfgCartao(c.cartao));
+  }, []);
 
   // Pré-preenche quando perfil carrega
   useEffect(() => {
@@ -438,7 +439,12 @@ export default function CheckoutPage() {
 
   const pixDiscount  = payment === "pix" ? (total - cupomDesconto) * 0.05 : 0;
   const shippingCost = calculateShipping(uf, total);
-  const finalTotal   = total - cupomDesconto - pixDiscount + shippingCost;
+  const baseTotal    = total - cupomDesconto - pixDiscount + shippingCost;
+  const parcelaOpts  = calcularParcelas(baseTotal, cfgCartao);
+  const parcelaSel   = parcelaOpts.find(p => p.parcelas === parcelas) ?? parcelaOpts[0];
+  const creditFee    = payment === "credit" && parcelaSel?.temJuros
+    ? parcelaSel.totalFinal - baseTotal : 0;
+  const finalTotal   = baseTotal + creditFee;
 
   async function handleApplyCupom() {
     const code = cupomInput.trim();
@@ -514,21 +520,17 @@ export default function CheckoutPage() {
       const generatedOrderNum = "RB-" + Math.random().toString(36).slice(2, 8).toUpperCase();
       setOrderNum(generatedOrderNum);
 
-      // ── 1. Chama PagHiper via Edge Function ──────────────────────
-      const payResult = await createPayment(
-        { name, cpf, email, phone, cep, address, addressNum, complement, neighborhood, city, state: uf },
-        { method: payment, total: finalTotal, orderNumber: generatedOrderNum },
-      );
-
-      if (payResult.error) {
-        setErrors({ submit: payResult.error });
-        return;
+      // ── 1. Chama PagHiper via Edge Function (apenas PIX e Boleto) ──
+      if (payment !== "credit") {
+        const payResult = await createPayment(
+          { name, cpf, email, phone, cep, address, addressNum, complement, neighborhood, city, state: uf },
+          { method: payment, total: finalTotal, orderNumber: generatedOrderNum },
+        );
+        if (payResult.error) { setErrors({ submit: payResult.error }); return; }
+        if (payResult.pixCode)      setPixCode(payResult.pixCode);
+        if (payResult.pixQrCodeUrl) setPixQrCodeUrl(payResult.pixQrCodeUrl);
+        if (payResult.boletoCode)   setBoletoCode(payResult.boletoCode);
       }
-
-      // Salva dados do pagamento
-      if (payResult.pixCode)      setPixCode(payResult.pixCode);
-      if (payResult.pixQrCodeUrl) setPixQrCodeUrl(payResult.pixQrCodeUrl);
-      if (payResult.boletoCode)   setBoletoCode(payResult.boletoCode);
 
       // ── 2. Salva pedido no Supabase (com timeout — não bloqueia o checkout) ───
       try {
@@ -545,8 +547,8 @@ export default function CheckoutPage() {
           shipping_neighborhood: neighborhood,
           shipping_city:         city,
           shipping_state:        uf,
-          payment_method:        payment,
-          payment_installments:  1,
+          payment_method:        payment === "credit" ? "credit" : payment,
+          payment_installments:  payment === "credit" ? parcelas : 1,
           subtotal:              total,
           discount:              cupomDesconto + pixDiscount,
           shipping_cost:         shippingCost,
@@ -582,7 +584,7 @@ export default function CheckoutPage() {
 
       // ── 3. Avança para a tela de pagamento ────────────────────────
       setPaidTotal(finalTotal);   // captura ANTES do clearCart
-      const nextStep: Step = payment === "pix" ? "pix" : "boleto";
+      const nextStep: Step = payment === "pix" ? "pix" : payment === "boleto" ? "boleto" : "success";
       setStep(nextStep);
       clearCart();
 
@@ -758,25 +760,27 @@ export default function CheckoutPage() {
               </div>
               <div className="px-6 py-5 space-y-3">
 
-                {/* PIX */}
-                {(["pix","boleto"] as PaymentMethod[]).map((method) => {
-                  const cfg = {
-                    pix:    { icon: Smartphone, color: "text-green-500",  label: "PIX",             sub: "Pagamento instantâneo",       badge: "5% OFF", badgeCls: "bg-green-100 text-green-700" },
-                    boleto: { icon: FileText,   color: "text-orange-500", label: "Boleto bancário",  sub: "Vencimento em 1 dia útil",    badge: null,     badgeCls: "" },
-                  }[method];
-                  const Icon = cfg.icon;
+                {(["pix","boleto","credit"] as PaymentMethod[]).map((method) => {
+                  const cfgMap = {
+                    pix:    { icon: Smartphone,  color: "text-green-500",  label: "PIX",                sub: "Pagamento instantâneo",     badge: "5% OFF",  badgeCls: "bg-green-100 text-green-700"  },
+                    boleto: { icon: FileText,     color: "text-orange-500", label: "Boleto bancário",    sub: "Vencimento em 1 dia útil",  badge: null,       badgeCls: ""                             },
+                    credit: { icon: CreditCard,   color: "text-blue-500",   label: "Cartão de crédito",  sub: "Parcelamento disponível",   badge: null,       badgeCls: ""                             },
+                  };
+                  const c = cfgMap[method];
+                  const Icon = c.icon;
                   return (
                     <div key={method}>
                       <label className={`flex items-center gap-4 p-4 rounded-xl border-2 cursor-pointer transition-colors
                         ${payment===method ? "border-[#e8001c] bg-red-50/40" : "border-gray-200 hover:border-gray-300"}`}>
                         <input type="radio" name="pay" value={method} checked={payment===method}
-                          onChange={()=>setPayment(method)} className="accent-[#e8001c] w-4 h-4 shrink-0" />
-                        <Icon className={`h-5 w-5 ${cfg.color} shrink-0`} />
+                          onChange={() => { setPayment(method); setParcelas(1); }}
+                          className="accent-[#e8001c] w-4 h-4 shrink-0" />
+                        <Icon className={`h-5 w-5 ${c.color} shrink-0`} />
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold text-gray-800">{cfg.label}</p>
-                          <p className="text-xs text-gray-500">{cfg.sub}</p>
+                          <p className="text-sm font-semibold text-gray-800">{c.label}</p>
+                          <p className="text-xs text-gray-500">{c.sub}</p>
                         </div>
-                        {cfg.badge && <span className={`text-xs font-bold px-2.5 py-1 rounded-full shrink-0 whitespace-nowrap ${cfg.badgeCls}`}>{cfg.badge}</span>}
+                        {c.badge && <span className={`text-xs font-bold px-2.5 py-1 rounded-full shrink-0 whitespace-nowrap ${c.badgeCls}`}>{c.badge}</span>}
                       </label>
 
                       {method==="pix" && payment==="pix" && (
@@ -795,6 +799,38 @@ export default function CheckoutPage() {
                           <p className="text-xs text-orange-700">
                             O boleto será gerado após a confirmação. Prazo de compensação: 1–3 dias úteis.
                           </p>
+                        </div>
+                      )}
+
+                      {method==="credit" && payment==="credit" && (
+                        <div className="ml-4 mt-2 space-y-2">
+                          <p className="text-xs font-semibold text-gray-500 px-1">Escolha o parcelamento:</p>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {parcelaOpts.map(p => (
+                              <button
+                                key={p.parcelas}
+                                type="button"
+                                onClick={() => setParcelas(p.parcelas)}
+                                className={`text-left text-[11px] px-3 py-2 rounded-lg border-2 transition-colors leading-tight ${
+                                  parcelas === p.parcelas
+                                    ? "border-[#e8001c] bg-red-50/40 text-gray-900"
+                                    : "border-gray-200 hover:border-gray-300 text-gray-600"
+                                }`}
+                              >
+                                <span className="font-bold text-xs">{p.parcelas}x</span>{" "}
+                                <span>{fmt(p.valorParcela)}</span>
+                                {p.temJuros
+                                  ? <span className="text-amber-600 ml-1 text-[10px]">(+juros)</span>
+                                  : <span className="text-green-600 ml-1 text-[10px]">sem juros</span>}
+                              </button>
+                            ))}
+                          </div>
+                          {parcelaSel?.temJuros && (
+                            <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                              Total com juros: <strong>{fmt(parcelaSel.totalFinal)}</strong>
+                              {" "}(acréscimo de {fmt(parcelaSel.totalFinal - baseTotal)})
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>
@@ -888,6 +924,12 @@ export default function CheckoutPage() {
                   <div className="flex justify-between text-sm">
                     <span className="text-green-600 font-medium">Desconto PIX (5%)</span>
                     <span className="text-green-600 font-medium">-{fmt(pixDiscount)}</span>
+                  </div>
+                )}
+                {payment === "credit" && creditFee > 0 && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-amber-600 font-medium">Taxa cartão ({parcelas}x)</span>
+                    <span className="text-amber-600 font-medium">+{fmt(creditFee)}</span>
                   </div>
                 )}
                 <div className="flex justify-between text-sm">

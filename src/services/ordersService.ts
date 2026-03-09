@@ -1,5 +1,6 @@
 import { restGet, restPost, restPostMany, restPatch } from "./supabaseRest";
 import { isSupabaseConfigured } from "./supabaseClient";
+import { decrementarEstoque, restaurarEstoque } from "./estoqueService";
 
 /* ── Tipos ─────────────────────────────────────────────────────── */
 export interface OrderItemInput {
@@ -36,6 +37,7 @@ export interface OrderInput {
   payment_qr_url?:      string | null;
   vendedor_nome?:       string | null;
   cupom_codigo?:        string | null;
+  observacoes?:         string | null;
   items:                OrderItemInput[];
 }
 
@@ -71,6 +73,7 @@ export interface Order {
   payment_qr_url:        string | null;
   vendedor_nome:         string | null;
   cupom_codigo:          string | null;
+  observacoes:           string | null;
   created_at:            string;
   order_items:           OrderItem[];
 }
@@ -105,6 +108,7 @@ export async function createOrder(input: OrderInput): Promise<{ order: Order | n
       payment_qr_url:        input.payment_qr_url ?? null,
       vendedor_nome:         input.vendedor_nome  ?? null,
       cupom_codigo:          input.cupom_codigo   ?? null,
+      observacoes:           input.observacoes    ?? null,
       created_at:            new Date().toISOString(),
       order_items:           input.items.map((i) => ({ ...i, id: crypto.randomUUID(), order_id: "" })),
     };
@@ -137,6 +141,8 @@ export async function createOrder(input: OrderInput): Promise<{ order: Order | n
       payment_qr_url:        input.payment_qr_url ?? null,
       vendedor_nome:         input.vendedor_nome  ?? null,
       cupom_codigo:          input.cupom_codigo   ?? null,
+      // Inclui observacoes só se a coluna já existe no banco (requer migration_config.sql)
+      ...(input.observacoes ? { observacoes: input.observacoes } : {}),
     });
 
     // 2. Insere os itens em lote
@@ -153,6 +159,11 @@ export async function createOrder(input: OrderInput): Promise<{ order: Order | n
     }));
 
     await restPostMany("order_items", itemsToInsert);
+
+    // 3. Desconta estoque de cada produto vendido
+    await decrementarEstoque(
+      input.items.map(i => ({ product_id: i.product_id, quantity: i.quantity })),
+    );
 
     return {
       order: {
@@ -212,6 +223,46 @@ export async function updateOrderStatus(
   orderId: string,
   status: Order["status"],
 ): Promise<void> {
+  // Ao cancelar: restaura estoque
+  if (status === "cancelled") {
+    try {
+      const items = await restGet<{ product_id: string; quantity: number }>("order_items", {
+        select:   "product_id,quantity",
+        order_id: `eq.${orderId}`,
+      });
+      if (items.length > 0) await restaurarEstoque(items);
+    } catch { /* não bloqueia */ }
+  }
+
+  // Ao entregar: cria entrada no fluxo de caixa automaticamente
+  if (status === "delivered") {
+    try {
+      const rows = await restGet<{
+        order_number: string;
+        total: number;
+        payment_method: string;
+        vendedor_nome: string | null;
+      }>("orders", {
+        select: "order_number,total,payment_method,vendedor_nome",
+        id:     `eq.${orderId}`,
+      });
+      if (rows.length > 0) {
+        const o = rows[0];
+        const payMap: Record<string, string> = {
+          pix: "PIX", credit: "Cartão de Crédito", boleto: "Boleto",
+        };
+        await restPost("fluxo_caixa", {
+          tipo:            "entrada",
+          categoria:       o.vendedor_nome ? "Venda PDV" : "Venda Online",
+          descricao:       `Pedido ${o.order_number}`,
+          valor:           Number(o.total),
+          data:            new Date().toISOString().slice(0, 10),
+          forma_pagamento: payMap[o.payment_method] ?? o.payment_method,
+        });
+      }
+    } catch { /* não bloqueia */ }
+  }
+
   await restPatch("orders", { column: "id", value: orderId }, {
     status,
     updated_at: new Date().toISOString(),
